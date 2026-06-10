@@ -487,6 +487,19 @@ jQuery(window.document).ready(async function() {
         .end()
     ;
 
+    jQuery('#idCondition_Threshold')
+        .val(parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 95)
+        .on('change', async function() {
+            let intThreshold = Math.max(1, Math.min(100, parseInt(jQuery(this).val()) || 95));
+
+            jQuery(this)
+                .val(intThreshold)
+            ;
+
+            await funcStorageset('extensions.Youwatch.Condition.intThreshold', intThreshold);
+        })
+    ;
+
     jQuery('#idVisualization_Fadeout')
         .on('click', async function() {
             await funcStorageset('extensions.Youwatch.Visualization.boolFadeout', await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(false));
@@ -581,6 +594,39 @@ jQuery(window.document).ready(async function() {
             .eq(1)
                 .css({
                     'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true) ? 'block' : 'none',
+                })
+            .end()
+        .end()
+    ;
+
+    jQuery('#idVisualization_Showwatching')
+        .on('click', async function() {
+            await funcStorageset('extensions.Youwatch.Visualization.boolShowwatching', await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(false));
+
+            jQuery(this)
+                .find('i')
+                    .eq(0)
+                        .css({
+                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'none' : 'block',
+                        })
+                    .end()
+                    .eq(1)
+                        .css({
+                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'block' : 'none',
+                        })
+                    .end()
+                .end()
+            ;
+        })
+        .find('i')
+            .eq(0)
+                .css({
+                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'none' : 'block',
+                })
+            .end()
+            .eq(1)
+                .css({
+                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'block' : 'none',
                 })
             .end()
         .end()
@@ -798,7 +844,19 @@ jQuery(window.document).ready(async function() {
                                             'font-size': '13px',
                                             'margin': '5px 0px 0px 0px',
                                         })
-                                        .text(objVideo.intCount + ' View' + (objVideo.intCount == 1 ? '' : 's'))
+                                        .text((objVideo.intCount || 0) + ' completed view' + ((objVideo.intCount || 0) == 1 ? '' : 's'))
+                                    )
+                                    .append(jQuery('<div></div>')
+                                        .css({
+                                            'display': 'inline-block',
+                                            'background-color': (objVideo.strState || 'watched') === 'watched' ? '#000000' : '#065fd4',
+                                            'border-radius': '2px',
+                                            'color': '#FFFFFF',
+                                            'font-size': '11px',
+                                            'margin': '7px 0px 0px 0px',
+                                            'padding': '3px 6px 3px 6px',
+                                        })
+                                        .text((objVideo.strState || 'watched') === 'watched' ? 'WATCHED' : ('WATCHING' + ((objVideo.intPercent > 0) ? (' ' + objVideo.intPercent + '%') : '')))
                                     )
                                 )
                                 .append(jQuery('<div></div>')

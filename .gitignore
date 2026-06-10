@@ -1,1 +1,14 @@
 /.project
+
+# build artifacts
+*.zip
+*.xpi
+
+# vendored libraries - supplied at packaging time, not committed (matches upstream)
+/idb.js
+/content/jquery.js
+/content/moment.js
+/content/bootstrap.css
+/content/fontawesome.css
+/content/download.js
+/content/webfonts/

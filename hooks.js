@@ -215,12 +215,23 @@ let funcParsevideos = function(strText, boolProgress) {
     return objVideos;
 };
 
+let funcPercent = function(objVideo) { // the resume progress bar reports how much of the video has been watched
+    let objMatch = JSON.stringify(objVideo).match(/"percentDurationWatched":\s*(\d+)/);
+
+    if (objMatch !== null) {
+        return parseInt(objMatch[1]);
+    }
+
+    return null;
+};
+
 let funcEmitvideos = function(strText) {
     for (let objVideo of funcParsevideos(strText, true)) {
         document.dispatchEvent(new CustomEvent('youtubeProgress', {
             'detail': {
                 'strIdent': objVideo['strIdent'],
                 'strTitle': objVideo['strTitle'],
+                'intPercent': funcPercent(objVideo['objVideo']),
             },
         }));
     }

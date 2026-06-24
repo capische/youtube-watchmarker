@@ -7,6 +7,7 @@ let objReported = {}; // strIdent -> last whole percent we reported to the backg
 let intThreshold = 95; // the percentage of a video that counts as watched, kept in sync with the settings
 let boolYouhist = true; // whether videos shown on the youtube history page should be marked as watched
 let objObservers = new WeakMap();
+let objHovers = new WeakSet();
 
 chrome.storage.local.get(['extensions.Youwatch.Condition.intThreshold', 'extensions.Youwatch.Condition.boolYouhist'], function(objValue) {
     intThreshold = parseInt(objValue['extensions.Youwatch.Condition.intThreshold']) || 95;
@@ -55,17 +56,76 @@ let funcIdent = function(objVideo) { // the 11 character id sits after /shorts/ 
     return objVideo.href.split('&')[0].slice(-11);
 };
 
+// turns a youtube history section header ("Today", "Yesterday", "Jun 21, 2025", "Saturday, June 21", ...) into a timestamp;
+// the watch history only exposes a per-day date, so this resolves to that day (good enough to match what youtube shows)
+let funcHistorydate = function(strText) {
+    strText = (strText || '').trim();
+
+    if (strText === '') {
+        return null;
+    }
+
+    let objNow = new Date();
+    let strLower = strText.toLowerCase();
+
+    if (strLower === 'today') {
+        return objNow.getTime();
+
+    } else if (strLower === 'yesterday') {
+        return objNow.getTime() - 86400000;
+
+    }
+
+    let intParsed = Date.parse(strText); // handles absolute dates such as "Jun 21, 2025"
+
+    if (isNaN(intParsed) === true) {
+        intParsed = Date.parse(strText + ', ' + objNow.getFullYear()); // headers without a year (current year) eg "Saturday, June 21"
+
+        if ((isNaN(intParsed) === false) && (intParsed > objNow.getTime())) {
+            intParsed = Date.parse(strText + ', ' + (objNow.getFullYear() - 1)); // that day has not happened yet this year, so it was last year
+        }
+    }
+
+    return isNaN(intParsed) === true ? null : intParsed;
+};
+
+// reads the date of the history section a given video sits in, if it can be located in the dom
+let funcHistorytimestamp = function(objVideo) {
+    let objSection = objVideo.closest('ytd-item-section-renderer');
+
+    if (objSection === null) {
+        return null;
+    }
+
+    let objTitle = objSection.querySelector('#title');
+
+    if (objTitle === null) {
+        return null;
+    }
+
+    return funcHistorydate(objTitle.innerText || objTitle.textContent || '');
+};
+
 let refresh = async function() {
     let objVideos = videos('');
-    let boolHistory = (window.location.pathname === '/feed/history'); // every video listed here has been watched
+
+    // the watch-history feed renders inside a browse element that only carries page-subtype="history" once the history
+    // content has actually loaded - relying on this (instead of the url alone) avoids a window during navigation where the
+    // url is already /feed/history but the previous page's thumbnails (eg the homepage) are still in the dom and would
+    // otherwise get marked as watched. each video is additionally checked to actually sit inside that container.
+    let objHistory = (window.location.pathname === '/feed/history') ? window.document.querySelector('ytd-browse[page-subtype="history"], [page-subtype="history"]') : null;
 
     for (let objVideo of objVideos) {
         let strIdent = funcIdent(objVideo);
         let strTitle = '';
 
+        let boolHistory = (objHistory !== null) && (boolYouhist === true) && (objHistory.contains(objVideo) === true);
+
         mark(objVideo, strIdent);
 
         observe(objVideo);
+
+        hoverify(objVideo);
 
         // watched videos never change so they stay cached, but watching videos need a re-lookup to pick up the latest progress
         if ((objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched')) {
@@ -90,12 +150,15 @@ let refresh = async function() {
         }
 
         await chrome.runtime.sendMessage({
-            // on the youtube history page we record the video as watched (assumed) instead of just looking it up
-            'strMessage': (boolHistory === true) && (boolYouhist === true) ? 'youtubeMark' : 'youtubeLookup',
+            // on the youtube history page we register the video (assumed - watched elsewhere) instead of just looking it up;
+            // a sub-threshold resume bar (red line) keeps it watching, otherwise it is assumed watched (shorts carry no bar)
+            'strMessage': boolHistory === true ? 'youtubeMark' : 'youtubeLookup',
             'strIdent': strIdent,
             'strTitle': strTitle,
-            'strState': 'watched',
+            'strState': 'watching',
             'boolAssumed': true,
+            // stamp it with the date youtube lists it under, so the plugin entry matches the watch history instead of "now"
+            'intTimestamp': boolHistory === true ? funcHistorytimestamp(objVideo) : null,
         }, function(objResponse) {
             if ((objResponse === null) || (objResponse === undefined)) {
                 return;
@@ -117,8 +180,41 @@ let refresh = async function() {
     strLastchange = window.location.href + ':' + window.document.title + ':' + objVideos.length;
 };
 
+let funcUnmark = function(objVideo) {
+    if (objVideo.classList.contains('youwatch-mark') === true) {
+        objVideo.classList.remove('youwatch-mark');
+        objVideo.classList.remove('youwatch-watched');
+        objVideo.classList.remove('youwatch-watching');
+
+        if (objVideo.hasAttribute('watchdate') === true) {
+            objVideo.removeAttribute('watchdate');
+        }
+
+        if (objVideo.hasAttribute('watchcount') === true) {
+            objVideo.removeAttribute('watchcount');
+        }
+
+        if (objVideo.hasAttribute('watchpercent') === true) {
+            objVideo.removeAttribute('watchpercent');
+        }
+
+        objVideo.style.removeProperty('--youwatch-percent');
+    }
+};
+
 let mark = function(objVideo, strIdent) {
     if (objVideodata.hasOwnProperty(strIdent) === true) {
+        // a shorts video can match two elements (a thumbnail link and a separate title link) - only the one that
+        // actually carries the thumbnail image gets marked, so the badge does not end up duplicated over the title
+        if (objVideo.querySelector('img, .ytp-videowall-still-image') === null) {
+            for (let objSibling of videos(strIdent)) {
+                if ((objSibling !== objVideo) && (objSibling.querySelector('img, .ytp-videowall-still-image') !== null)) {
+                    funcUnmark(objVideo);
+                    return;
+                }
+            }
+        }
+
         let objData = objVideodata[strIdent];
         let boolWatched = objData.strState === 'watched';
 
@@ -143,25 +239,8 @@ let mark = function(objVideo, strIdent) {
             objVideo.style.removeProperty('--youwatch-percent');
         }
 
-    } else if (objVideo.classList.contains('youwatch-mark') === true) {
-        objVideo.classList.remove('youwatch-mark');
-        objVideo.classList.remove('youwatch-watched');
-        objVideo.classList.remove('youwatch-watching');
-
-        if (objVideo.hasAttribute('watchdate') === true) {
-            objVideo.removeAttribute('watchdate');
-        }
-
-        if (objVideo.hasAttribute('watchcount') === true) {
-            objVideo.removeAttribute('watchcount');
-        }
-
-        if (objVideo.hasAttribute('watchpercent') === true) {
-            objVideo.removeAttribute('watchpercent');
-        }
-
-        objVideo.style.removeProperty('--youwatch-percent');
-
+    } else {
+        funcUnmark(objVideo);
     }
 };
 
@@ -177,6 +256,43 @@ let observe = function(objVideo) {
     objObserver.observe(objVideo, { 'attributes': true, 'attributeFilter': ['href'] });
 
     objObservers.set(objVideo, objObserver);
+};
+
+// hovering over the thumbnail alone only covers a small area, so the fadeout/grayout is also lifted while hovering
+// over the wider card (thumbnail + title) that triggers Youtube's own preview-on-hover behaviour
+let hoverify = function(objVideo) {
+    if (objHovers.has(objVideo) === true) {
+        return;
+    }
+
+    objHovers.add(objVideo);
+
+    let objCard = null;
+
+    for (let intLevel = 0, objAncestor = objVideo.parentNode; intLevel < 5; intLevel += 1, objAncestor = objAncestor.parentNode) {
+        if ((objAncestor === null) || (objAncestor === undefined) || (objAncestor === window.document.body)) {
+            break;
+        }
+
+        if ((objAncestor.querySelector('.ytLockupMetadataViewModelTitle') !== null) ||
+            (objAncestor.querySelector('.shortsLockupViewModelHostMetadataTitle') !== null) ||
+            (objAncestor.querySelector('#video-title') !== null)) {
+            objCard = objAncestor; break;
+
+        }
+    }
+
+    if (objCard === null) {
+        return; // no wider card found, the thumbnail's own :hover already covers this case
+    }
+
+    objCard.addEventListener('mouseenter', function() {
+        objVideo.classList.add('youwatch-hover');
+    });
+
+    objCard.addEventListener('mouseleave', function() {
+        objVideo.classList.remove('youwatch-hover');
+    });
 };
 
 // ##########################################################
@@ -221,6 +337,7 @@ chrome.runtime.onMessage.addListener(async function(objData, objSender, funcResp
 
         for (let objVideo of videos(objData.strIdent)) {
             mark(objVideo, objData.strIdent);
+            hoverify(objVideo);
         }
 
     }

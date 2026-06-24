@@ -18,10 +18,43 @@ let funcStorageset = async function(strKey, objValue) {
      await chrome.storage.local.set({ [strKey]: String(objValue) });
 };
 
+let objThemes = { // the visual look of the marks - each theme supplies the stylesheet strings used when rendering them
+    'orange': {
+        'strFadeout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { opacity:0.3; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { opacity:1.0; }',
+        'strGrayout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { filter:grayscale(1.0); transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { filter:none; }',
+        'strShowbadge': '.youwatch-watched::after { background-color:#000000; border-radius:2px; color:#FFFFFF; content:"WATCHED"; font-size:11px; left:4px; opacity:0.8; padding:3px 4px 3px 4px; position:absolute; top:4px; }',
+        'strShowwatching': '.youwatch-watching { position:relative; border-radius:12px; overflow:hidden; } .youwatch-watching::after { background-color:#ff8f00; border-radius:8px; box-shadow:0px 1px 4px rgba(0,0,0,0.45); color:#0f0f0f; content:"▶ WATCHING"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; } .youwatch-watching[watchpercent]::after { content:"▶ WATCHING " attr(watchpercent) "%"; } .youwatch-watching::before { background-color:#ff8f00; top:0px; content:""; height:3px; left:0px; position:absolute; width:var(--youwatch-percent, 0%); z-index:3; }',
+    },
+    'bw': { // black and white - grayscale on watched, watching keeps its colour with a light fade, both wear a black pill badge
+        'strFadeout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { opacity:0.3; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watching img.ytCoreImageHost, .youwatch-watching .ytp-videowall-still-image { opacity:0.7; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watching:hover img.ytCoreImageHost, .youwatch-watching:hover .ytp-videowall-still-image, .youwatch-watching:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video, .youwatch-watching.youwatch-hover img.ytCoreImageHost, .youwatch-watching.youwatch-hover .ytp-videowall-still-image, .youwatch-watching.youwatch-hover video { opacity:1.0; }',
+        'strGrayout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { filter:grayscale(1.0); transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { filter:none; }',
+        'strShowbadge': '.youwatch-watched::after { background-color:#0f0f0f; border-radius:8px; color:#FFFFFF; content:"WATCHED"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; }',
+        'strShowwatching': '.youwatch-watching { position:relative; border-radius:12px; overflow:hidden; } .youwatch-watching::after { background-color:#0f0f0f; border-radius:8px; color:#FFFFFF; content:"WATCHING"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; } .youwatch-watching[watchpercent]::after { content:"WATCHING " attr(watchpercent) "%"; }',
+    },
+};
+
+let funcApplytheme = async function(strTheme) { // refresh the stylesheet strings from a theme, unless a string was manually customized (carries a 'do not modify' marker)
+    if (objThemes.hasOwnProperty(strTheme) === false) {
+        strTheme = 'bw';
+    }
+
+    await funcStorageset('extensions.Youwatch.Visualization.strTheme', strTheme);
+
+    for (let strKey of ['strFadeout', 'strGrayout', 'strShowbadge', 'strShowwatching']) {
+        let strCurrent = await funcStorageget('extensions.Youwatch.Stylesheet.' + strKey);
+
+        if ((strCurrent === null) || (strCurrent.indexOf('do not modify') === -1)) {
+            await funcStorageset('extensions.Youwatch.Stylesheet.' + strKey, objThemes[strTheme][strKey]);
+        }
+    }
+};
+
 // merges one video into the store and applies the watching/watched state rules
 // - boolConfirmed: the threshold was reached locally (a real completion here) - this is sticky and never demoted
 // - boolOpened: the video was opened/played in this browser with the extension active, so its live progress is authoritative
-// - boolAssumed: a "watched" coming from the youtube/browser history (watched elsewhere) - only wins when we never opened it here
+// - boolAssumed: the video showed up in the watch history (watched elsewhere) - the resume bar (red line) percentage decides
+//   how far it was watched: a reading below the threshold is watching, anything else (full bar, no bar at all such as a short
+//   or a fully watched video, or browser history) counts as watched
 // - boolResume: a live reading taken right after opening - a resume from the middle overturns an assumed (not confirmed) watched
 // - intCount counts completed views: a brand new record is 1 if it arrives already watched else 0, an existing record
 //   gains +1 on a live completion (boolCompleted) or the first time it becomes watched
@@ -47,11 +80,14 @@ let funcRecord = async function(objStore, objVideo) {
         if (boolOpened === true) {
             strState = strStateold; // opened here, so the local state wins over the history assumption
 
-        } else if ((boolNew === false) && (strStateold === 'watching') && ((objGet.intPercent || 0) >= 5)) {
-            strState = 'watching'; // a resume bar already told us it is only partially watched - do not assume watched
+        } else if (objVideo.strState === 'watched') {
+            strState = 'watched'; // the resume bar reached the threshold, or there is no bar at all (a short / a fully watched video / browser history)
+
+        } else if ((objVideo.intPercent !== undefined) && (objVideo.intPercent !== null)) {
+            strState = 'watching'; // a fresh resume-bar reading below the threshold - only partially watched elsewhere
 
         } else {
-            strState = 'watched'; // no better evidence, so assume it was watched elsewhere
+            strState = boolNew ? 'watched' : strStateold; // no reading at all - a new history entry is assumed watched (shorts carry no bar), an existing one keeps its state
 
         }
 
@@ -449,6 +485,50 @@ let funcParsevideos = function(strText, boolProgress) {
     return objVideos;
 };
 
+let funcPercent = function(objVideo) { // the resume progress bar (red line) reports how much of the video has been watched
+    let strJson = JSON.stringify(objVideo);
+    let objMatch = null;
+
+    if ((objMatch = strJson.match(/"percentDurationWatched":\s*(\d+)/)) !== null) {
+        return parseInt(objMatch[1]); // videoRenderer / compactVideoRenderer / playlistVideoRenderer carry it directly
+    }
+
+    if ((objMatch = strJson.match(/"thumbnailOverlayProgressBarViewModel":\s*\{([^{}]*)\}/)) !== null) {
+        let intPercent = null; // the newer lockupViewModel exposes the watched extent through the resume bar view model
+
+        for (let objIter of objMatch[1].matchAll(/"(?:start|end)Percent":\s*(\d+)/g)) {
+            intPercent = Math.max(intPercent === null ? 0 : intPercent, parseInt(objIter[1])); // the watched bar reaches its furthest edge
+        }
+
+        return intPercent;
+    }
+
+    return null;
+};
+
+// pulls the per-video "remove from watch history" tokens out of a parsed lockupViewModel, or null when it carries none
+let funcDeletetokens = function(objVideo) {
+    try {
+        for (let objItem of objVideo['lockupViewModel']['metadata']['lockupMetadataViewModel']['menuButton']['buttonViewModel']['onTap']['innertubeCommand']['showSheetCommand']['panelLoadingStrategy']['inlineContent']['sheetViewModel']['content']['listViewModel']['listItems']) {
+            if (JSON.stringify(objItem).indexOf('"DELETE"') !== -1) {
+                return {
+                    'strClicktrack': objItem['listItemViewModel']['rendererContext']['commandContext']['onTap']['innertubeCommand']['clickTrackingParams'],
+                    'strFeedback': objItem['listItemViewModel']['rendererContext']['commandContext']['onTap']['innertubeCommand']['feedbackEndpoint']['feedbackToken'],
+                };
+            }
+        }
+    } catch (objError) {
+        // the entry is an older renderer without this menu - it carries no usable delete token
+    }
+
+    return null;
+};
+
+// caches the youtube watch history pages across deletions so repeated deletes reuse the already fetched token map;
+// kept short lived since the history changes over time and the feedback tokens should not be relied on for long
+let objHistorycache = null; // { intTimestamp, objContext, objTokens: { strIdent: { strClicktrack, strFeedback } }, strContinuation, strClicktrack, intPages, boolExhausted }
+let intHistorycachettl = 300000; // 5 minutes
+
 // ##########################################################
 
 let Database = {
@@ -748,6 +828,8 @@ let Youtube = {
         let intNew = 0;
         let intExisting = 0;
 
+        let intThreshold = parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 95;
+
         let objContext = null;
         let strClicktrack = null;
         let strContinuation = null;
@@ -800,11 +882,17 @@ let Youtube = {
 
                 }
 
-                // the youtube watch history could be from any device - assume watched unless we tracked it here ourselves
+                // the youtube watch history could be from any device - the resume bar (red line) on the thumbnail decides how
+                // far it was actually watched: only a bar below the threshold is watching, a full bar or no bar at all (a short
+                // or a fully watched video carries none) counts as watched
+                let intPercent = funcPercent(objVideo['objVideo']);
+                let strState = ((intPercent !== null) && (intPercent < intThreshold)) ? 'watching' : 'watched';
+
                 await funcRecord(objDatabase, {
                     'strIdent': objVideo['strIdent'],
                     'strTitle': objVideo['strTitle'],
-                    'strState': 'watched',
+                    'strState': strState,
+                    'intPercent': intPercent,
                     'boolAssumed': true,
                 });
 
@@ -875,6 +963,7 @@ let Youtube = {
             'boolOpened': objRequest.boolOpened === true,
             'boolResume': objRequest.boolResume === true,
             'boolAssumed': objRequest.boolAssumed === true,
+            'boolConfirmed': objRequest.boolConfirmed === true,
         });
 
         await funcStorageset('extensions.Youwatch.Database.intSize', await objDatabase.count());
@@ -950,8 +1039,34 @@ let Search = {
     },
 
     delete: async function(objRequest, funcProgress) {
+        let intStart = Date.now();
+        let funcLog = function(strLabel) {
+            console.log('[YWM delete] +' + String(Date.now() - intStart).padStart(5, ' ') + 'ms  ' + strLabel);
+        };
+
+        funcLog('begin delete of ' + objRequest.strIdent);
+
         let objTransaction = Database.objDatabase.transaction(['storeDatabase'], 'readwrite');
         let objDatabase = objTransaction.objectStore('storeDatabase');
+
+        // estimate how deep the video sits in the youtube history from its position in the local timeline, so we only
+        // page through roughly as far as needed (plus a safety margin) - this has to happen before the record is deleted
+        let intMaxFetch = 16; // fallback when the position cannot be estimated
+        try {
+            let objExisting = await objDatabase.get(objRequest.strIdent);
+
+            if ((objExisting !== undefined) && (objExisting !== null) && (objExisting.intTimestamp)) {
+                let intNewer = await objDatabase.index('intTimestamp').count(IDBKeyRange.lowerBound(objExisting.intTimestamp, true));
+                let intPage = Math.ceil(intNewer / 20); // youtube returns roughly 20 videos per history page
+                intMaxFetch = Math.min(intPage + 3, 30); // the estimated page plus a small safety margin, clamped to a sane range
+                funcLog('position estimate: ' + intNewer + ' newer records -> search up to ' + intMaxFetch + ' pages');
+            } else {
+                funcLog('position estimate: record not found -> search up to ' + intMaxFetch + ' pages (fallback)');
+            }
+        } catch (objError) {
+            // fall back to the default cap
+            funcLog('position estimate failed -> search up to ' + intMaxFetch + ' pages (fallback)');
+        }
 
         funcProgress({
             'strProgress': '1/5 - deleting it from the database',
@@ -963,6 +1078,8 @@ let Search = {
 
         await objTransaction.done;
 
+        funcLog('step 1 done - removed from local database');
+
         funcProgress({
             'strProgress': '2/5 - deleting it from the history in the browser',
         });
@@ -972,6 +1089,8 @@ let Search = {
             'startTime': 0,
             'maxResults': 1000000,
         });
+
+        funcLog('step 2 - browser history search returned ' + objHistory.length + ' entries');
 
         for (let objEntry of objHistory) {
             if ((objEntry.url.indexOf('.youtube.com/watch?v=') === -1) && (objEntry.url.indexOf('.youtube.com/shorts/') === -1)) {
@@ -987,88 +1106,104 @@ let Search = {
             });
         }
 
+        funcLog('step 2 done - removed matching urls from browser history');
+
         funcProgress({
             'strProgress': '3/5 - locating it in the history on youtube',
         });
 
-        let objLookup = null; // only deleting the first occurrence since going through the entire history would take too much time
+        // reuse the cached history pages when they are still fresh, otherwise start a new cache
+        if ((objHistorycache === null) || ((Date.now() - objHistorycache.intTimestamp) >= intHistorycachettl)) {
+            objHistorycache = {
+                'intTimestamp': Date.now(),
+                'objContext': null,
+                'objTokens': {},
+                'strContinuation': null,
+                'strClicktrack': null,
+                'intPages': 0,
+                'boolExhausted': false,
+            };
 
-        let objContext = null;
-        let strClicktrack = null;
-        let strContinuation = null;
+            funcLog('history cache: starting fresh');
+
+        } else {
+            funcLog('history cache: reusing ' + objHistorycache.intPages + ' page(s) / ' + Object.keys(objHistorycache.objTokens).length + ' known videos');
+
+        }
+
+        let objLookup = objHistorycache.objTokens.hasOwnProperty(objRequest.strIdent) === true ? objHistorycache.objTokens[objRequest.strIdent] : null;
+
+        if (objLookup !== null) {
+            funcLog('step 3 done - served from cache, no fetch needed');
+        }
 
         try {
-            for (let intFetch = 0; intFetch < 16; intFetch += 1) {
+            // keep paging (extending the shared cache) until the video turns up, the history runs out, or the budget is reached
+            while ((objLookup === null) && (objHistorycache.boolExhausted === false) && (objHistorycache.intPages < intMaxFetch)) {
                 let objFetch = null;
+                let intFetchStart = Date.now();
+                let strKind = '';
 
-                if ((objContext === null) || (strClicktrack === null) || (strContinuation === null)) {
+                if (objHistorycache.objContext === null) {
+                    strKind = 'initial /feed/history html';
                     objFetch = await fetch('https://www.youtube.com/feed/history', {
                         'method': 'GET',
                         'credentials': 'include',
                     });
 
-                } else if ((objContext !== null) && (strClicktrack !== null) && (strContinuation !== null)) {
-                    objFetch = await funcYoufetch('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', { 'continuation': strContinuation }, objContext, strClicktrack);
+                } else if (objHistorycache.strContinuation !== null) {
+                    strKind = 'continuation browse api';
+                    objFetch = await funcYoufetch('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', { 'continuation': objHistorycache.strContinuation }, objHistorycache.objContext, objHistorycache.strClicktrack);
 
-                    strContinuation = null;
+                } else {
+                    break; // no context yet would be page 1; otherwise no continuation means there is nothing more to fetch
 
                 }
 
                 let strResponse = await objFetch.text();
 
-                if (objContext === null) {
-                    objContext = funcHackyparse(strResponse.split('"INNERTUBE_CONTEXT":')[1]);
+                funcLog('  page ' + (objHistorycache.intPages + 1) + ' (' + strKind + ') fetched in ' + (Date.now() - intFetchStart) + 'ms, ' + strResponse.length + ' chars');
+
+                if (objHistorycache.objContext === null) {
+                    objHistorycache.objContext = funcHackyparse(strResponse.split('"INNERTUBE_CONTEXT":')[1]);
                 }
 
                 let strRegex = null;
                 let objClicktrack = new RegExp('"continuationEndpoint":[^"]*"clickTrackingParams":[^"]*"([^"]*)"', 'g');
                 let objContinuation = new RegExp('"continuationCommand":[^"]*"token":[^"]*"([^"]*)"', 'g');
 
-                if ((strRegex = objClicktrack.exec(strResponse)) !== null) {
-                    strClicktrack = strRegex[1];
-                }
+                objHistorycache.strClicktrack = (strRegex = objClicktrack.exec(strResponse)) !== null ? strRegex[1] : null;
+                objHistorycache.strContinuation = (strRegex = objContinuation.exec(strResponse)) !== null ? strRegex[1] : null;
+                objHistorycache.intPages += 1;
 
-                if ((strRegex = objContinuation.exec(strResponse)) !== null) {
-                    strContinuation = strRegex[1];
+                if (objHistorycache.strContinuation === null) {
+                    objHistorycache.boolExhausted = true; // youtube did not hand us a way to page further
                 }
 
                 for (let objVideo of funcParsevideos(strResponse, false)) {
-                    let strIdent = objVideo['strIdent'];
-
-                    if (strIdent !== objRequest.strIdent) {
+                    if (objHistorycache.objTokens.hasOwnProperty(objVideo['strIdent']) === true) {
                         continue;
                     }
 
-                    let strClicktrack = null;
-                    let strFeedback = null;
+                    let objTokens = funcDeletetokens(objVideo['objVideo']);
 
-                    for (let objItem of objVideo['objVideo']['lockupViewModel']['metadata']['lockupMetadataViewModel']['menuButton']['buttonViewModel']['onTap']['innertubeCommand']['showSheetCommand']['panelLoadingStrategy']['inlineContent']['sheetViewModel']['content']['listViewModel']['listItems']) {
-                        if (JSON.stringify(objItem).indexOf('"DELETE"') !== -1) {
-                            strClicktrack = objItem['listItemViewModel']['rendererContext']['commandContext']['onTap']['innertubeCommand']['clickTrackingParams'];
-                            strFeedback = objItem['listItemViewModel']['rendererContext']['commandContext']['onTap']['innertubeCommand']['feedbackEndpoint']['feedbackToken'];
-                        }
+                    if (objTokens !== null) {
+                        objHistorycache.objTokens[objVideo['strIdent']] = objTokens;
                     }
+                }
 
-                    if (strClicktrack === null) {
-                        continue;
-
-                    } else if (strFeedback === null) {
-                        continue;
-
-                    }
-
-                    objLookup = {
-                        'strIdent': strIdent,
-                        'strClicktrack': strClicktrack,
-                        'strFeedback': strFeedback,
-                    };
+                if (objHistorycache.objTokens.hasOwnProperty(objRequest.strIdent) === true) {
+                    objLookup = objHistorycache.objTokens[objRequest.strIdent];
+                    funcLog('step 3 done - found on page ' + objHistorycache.intPages);
                 }
             }
         } catch (objError) {
-            // ...
+            funcLog('step 3 threw: ' + objError);
         }
 
         if (objLookup === null) {
+            funcLog('step 3 done - NOT found (cache now holds ' + objHistorycache.intPages + ' page(s))');
+
             funcProgress({
                 'strProgress': '4/5 - did not find it in the history on youtube',
             });
@@ -1078,13 +1213,21 @@ let Search = {
                 'strProgress': '4/5 - deleting it from the history on youtube',
             });
 
-            await funcYoufetch('https://www.youtube.com/youtubei/v1/feedback', { 'feedbackTokens': [objLookup.strFeedback], 'isFeedbackTokenUnencrypted': false, 'shouldMerge': false }, objContext, strClicktrack);
+            let intFeedbackStart = Date.now();
+
+            await funcYoufetch('https://www.youtube.com/youtubei/v1/feedback', { 'feedbackTokens': [objLookup.strFeedback], 'isFeedbackTokenUnencrypted': false, 'shouldMerge': false }, objHistorycache.objContext, objLookup.strClicktrack);
+
+            funcLog('step 4 done - youtube feedback delete request took ' + (Date.now() - intFeedbackStart) + 'ms');
+
+            delete objHistorycache.objTokens[objRequest.strIdent]; // it is gone from youtube now, so drop its stale token
 
             funcProgress({
                 'strProgress': '5/5 - looks like we are all done here',
             });
 
         }
+
+        funcLog('total ' + (Date.now() - intStart) + 'ms');
 
         return {};
     }
@@ -1155,32 +1298,14 @@ let Search = {
         await funcStorageset('extensions.Youwatch.Visualization.boolShowdate', false);
     }
 
-    if (await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === null) {
-        await funcStorageset('extensions.Youwatch.Visualization.boolHideprogress', true);
+    if (await funcStorageget('extensions.Youwatch.Visualization.strTheme') === null) {
+        await funcStorageset('extensions.Youwatch.Visualization.strTheme', 'bw');
     }
 
-    if ((await funcStorageget('extensions.Youwatch.Stylesheet.strFadeout') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strFadeout')).indexOf('do not modify') === -1)) {
-        await funcStorageset('extensions.Youwatch.Stylesheet.strFadeout', '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { opacity:0.3; }');
-    }
-
-    if ((await funcStorageget('extensions.Youwatch.Stylesheet.strGrayout') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strGrayout')).indexOf('do not modify') === -1)) {
-        await funcStorageset('extensions.Youwatch.Stylesheet.strGrayout', '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { filter:grayscale(1.0); }');
-    }
-
-    if ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowbadge') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowbadge')).indexOf('do not modify') === -1)) {
-        await funcStorageset('extensions.Youwatch.Stylesheet.strShowbadge', '.youwatch-watched::after { background-color:#000000; border-radius:2px; color:#FFFFFF; content:"WATCHED"; font-size:11px; left:4px; opacity:0.8; padding:3px 4px 3px 4px; position:absolute; top:4px; }');
-    }
-
-    if ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowwatching') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowwatching')).indexOf('do not modify') === -1)) {
-        await funcStorageset('extensions.Youwatch.Stylesheet.strShowwatching', '.youwatch-watching { position:relative; border-radius:12px; overflow:hidden; } .youwatch-watching::after { background-color:#ff8f00; border:1px solid rgba(0,0,0,0.45); border-radius:8px; box-shadow:0px 1px 4px rgba(0,0,0,0.45); color:#0f0f0f; content:"▶ WATCHING"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; } .youwatch-watching[watchpercent]::after { content:"▶ WATCHING " attr(watchpercent) "%"; } .youwatch-watching::before { background-color:#ff8f00; top:0px; content:""; height:4px; left:0px; opacity:1.0; pointer-events:none; position:absolute; width:var(--youwatch-percent, 0%); z-index:3; }');
-    }
+    await funcApplytheme(await funcStorageget('extensions.Youwatch.Visualization.strTheme'));
 
     if ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowdate') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strShowdate')).indexOf('do not modify') === -1)) {
         await funcStorageset('extensions.Youwatch.Stylesheet.strShowdate', '.youwatch-watched::after { content:"WATCHED" attr(watchdate); white-space:nowrap; }');
-    }
-
-    if ((await funcStorageget('extensions.Youwatch.Stylesheet.strHideprogress') === null) || ((await funcStorageget('extensions.Youwatch.Stylesheet.strHideprogress')).indexOf('do not modify') === -1)) {
-        await funcStorageset('extensions.Youwatch.Stylesheet.strHideprogress', '.youwatch-watching yt-thumbnail-overlay-progress-bar-view-model, .youwatch-watching ytd-thumbnail-overlay-resume-playback-renderer, .youwatch-watching ytm-thumbnail-overlay-resume-playback-renderer { display:none !important; }');
     }
 
     await Database.init();
@@ -1215,7 +1340,14 @@ let Search = {
     };
 
     chrome.runtime.onMessage.addListener(function(objRequest, objSender, funcResponse) {
-        if (objRequest.strMessage === 'youtubeLookup') {
+        if (objRequest.strMessage === 'themeApply') {
+            funcApplytheme(objRequest.strTheme).then(function() {
+                funcResponse(true);
+            });
+
+            return true; // indicate async response
+
+        } else if (objRequest.strMessage === 'youtubeLookup') {
             if (objRequest.strTitle !== '') {
                 Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
             }
@@ -1234,9 +1366,11 @@ let Search = {
 
             Youtube.mark({
                 'strIdent': objRequest.strIdent,
+                'intTimestamp': objRequest.intTimestamp || undefined, // the date youtube lists it under, when supplied from the history page
                 'strTitle': objRequest.strTitle,
                 'strState': objRequest.strState,
                 'boolAssumed': objRequest.boolAssumed === true, // a watched coming from the youtube history page
+                'boolConfirmed': objRequest.boolConfirmed === true, // an explicit "mark as watched" that should stick
                 'boolEnsure': objRequest.boolEnsure,
             }).then(funcResponse);
 
@@ -1389,13 +1523,6 @@ let Search = {
             chrome.scripting.insertCSS({
                 target: { tabId: objTab.id },
                 css: await funcStorageget('extensions.Youwatch.Stylesheet.strShowdate'),
-            });
-        }
-
-        if (await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(true)) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strHideprogress'),
             });
         }
     });

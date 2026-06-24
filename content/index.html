@@ -21,7 +21,7 @@
 
         <script type="text/javascript" src="index.js"></script>
     </head>
-    <body style="cursor:default; line-height:1.1; padding:20px 20px 0px 20px;">
+    <body style="color-scheme:light; cursor:default; line-height:1.1; padding:20px 20px 0px 20px;">
         <div class="card" style="margin:0px auto 20px auto; max-width:700px;">
             <div class="card-header">
                 Database
@@ -124,7 +124,7 @@
                 </div>
 
                 <div class="input-group" style="margin:0px 0px 17px 0px;">
-                    <div class="form-control">Mark a video as being watched once it appears in Youtube's watch history.</div>
+                    <div class="form-control">Track videos from Youtube's watch history, reading the thumbnail's resume bar to tell how much of each was actually watched.</div>
                     <button class="btn btn-primary" id="idCondition_Youhist">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
@@ -133,7 +133,7 @@
 
                 <div class="input-group" style="margin:0px 0px 0px 0px;">
                     <div class="form-control">Consider a video watched once the player reaches this percentage of its duration.</div>
-                    <input class="form-control" id="idCondition_Threshold" type="number" min="1" max="100" step="1" style="flex:0 0 auto; max-width:90px; text-align:center;" />
+                    <input class="form-control" id="idCondition_Threshold" type="number" min="1" max="100" step="1" style="flex:0 0 auto; width:90px; text-align:center; color:#0f0f0f; background-color:#ffffff;" />
                     <span class="input-group-text">%</span>
                 </div>
             </div>
@@ -145,6 +145,14 @@
             </div>
 
             <div class="card-body">
+                <div class="input-group" style="margin:0px 0px 17px 0px;">
+                    <div class="form-control">Choose the colour theme used for the watched and watching marks.</div>
+                    <select class="form-select" id="idVisualization_Theme" style="flex:0 0 auto; width:170px; color:#0f0f0f; background-color:#ffffff;">
+                        <option value="orange">Orange</option>
+                        <option value="bw" selected>Black &amp; White</option>
+                    </select>
+                </div>
+
                 <div class="input-group" style="margin:0px 0px 17px 0px;">
                     <div class="form-control">Mark watched videos by slightly fading the thumbnail out.</div>
                     <button class="btn btn-primary" id="idVisualization_Fadeout">
@@ -177,17 +185,9 @@
                     </button>
                 </div>
 
-                <div class="input-group" style="margin:0px 0px 17px 0px;">
+                <div class="input-group" style="margin:0px 0px 0px 0px;">
                     <div class="form-control">Show the date of when the video has been watched in the textual badge.</div>
                     <button class="btn btn-primary" id="idVisualization_Showdate">
-                        <i class="fa-regular fa-square"></i>
-                        <i class="fa-regular fa-check-square"></i>
-                    </button>
-                </div>
-
-                <div class="input-group" style="margin:0px 0px 0px 0px;">
-                    <div class="form-control">Hide the progressbar that is being shown underneath watched videos.</div>
-                    <button class="btn btn-primary" id="idVisualization_Hideprogress">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
                     </button>

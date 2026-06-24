@@ -215,11 +215,22 @@ let funcParsevideos = function(strText, boolProgress) {
     return objVideos;
 };
 
-let funcPercent = function(objVideo) { // the resume progress bar reports how much of the video has been watched
-    let objMatch = JSON.stringify(objVideo).match(/"percentDurationWatched":\s*(\d+)/);
+let funcPercent = function(objVideo) { // the resume progress bar (red line) reports how much of the video has been watched
+    let strJson = JSON.stringify(objVideo);
+    let objMatch = null;
 
-    if (objMatch !== null) {
-        return parseInt(objMatch[1]);
+    if ((objMatch = strJson.match(/"percentDurationWatched":\s*(\d+)/)) !== null) {
+        return parseInt(objMatch[1]); // videoRenderer / compactVideoRenderer / playlistVideoRenderer carry it directly
+    }
+
+    if ((objMatch = strJson.match(/"thumbnailOverlayProgressBarViewModel":\s*\{([^{}]*)\}/)) !== null) {
+        let intPercent = null; // the newer lockupViewModel exposes the watched extent through the resume bar view model
+
+        for (let objIter of objMatch[1].matchAll(/"(?:start|end)Percent":\s*(\d+)/g)) {
+            intPercent = Math.max(intPercent === null ? 0 : intPercent, parseInt(objIter[1])); // the watched bar reaches its furthest edge
+        }
+
+        return intPercent;
     }
 
     return null;

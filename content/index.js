@@ -30,6 +30,27 @@ let funcStorageset = async function(strKey, objValue) {
      await chrome.storage.local.set({ [strKey]: String(objValue) });
 };
 
+// re-render the database size and the synchronization timestamps from storage - used on load and after any operation
+let funcRefreshstats = async function() {
+    let strSize = await funcStorageget('extensions.Youwatch.Database.intSize');
+
+    if (strSize !== null) {
+        jQuery('#idDatabase_Size').text(parseInt(strSize));
+    }
+
+    let strHistory = await funcStorageget('extensions.Youwatch.History.intTimestamp');
+
+    if (strHistory !== null) {
+        jQuery('#idHistory_Timestamp').text(moment(parseInt(strHistory)).format('YYYY.MM.DD - HH:mm:ss'));
+    }
+
+    let strYoutube = await funcStorageget('extensions.Youwatch.Youtube.intTimestamp');
+
+    if (strYoutube !== null) {
+        jQuery('#idYoutube_Timestamp').text(moment(parseInt(strYoutube)).format('YYYY.MM.DD - HH:mm:ss'));
+    }
+};
+
 jQuery(window.document).ready(async function() {
     jQuery('html')
         .attr({
@@ -198,9 +219,7 @@ jQuery(window.document).ready(async function() {
         })
     ;
 
-    jQuery('#idDatabase_Size')
-        .text(parseInt(await funcStorageget('extensions.Youwatch.Database.intSize')))
-    ;
+    await funcRefreshstats();
 
     jQuery('#idHistory_Synchronize')
         .on('click', function() {
@@ -258,10 +277,6 @@ jQuery(window.document).ready(async function() {
         })
     ;
 
-    jQuery('#idHistory_Timestamp')
-        .text(moment(parseInt(await funcStorageget('extensions.Youwatch.History.intTimestamp'))).format('YYYY.MM.DD - HH:mm:ss'))
-    ;
-
     jQuery('#idYoutube_Synchronize')
         .on('click', function() {
             jQuery('#idLoading_Container')
@@ -316,10 +331,6 @@ jQuery(window.document).ready(async function() {
                 }
             });
         })
-    ;
-
-    jQuery('#idYoutube_Timestamp')
-        .text(moment(parseInt(await funcStorageget('extensions.Youwatch.Youtube.intTimestamp'))).format('YYYY.MM.DD - HH:mm:ss'))
     ;
 
     jQuery('#idCondition_Brownav')
@@ -500,6 +511,17 @@ jQuery(window.document).ready(async function() {
         })
     ;
 
+    jQuery('#idVisualization_Theme')
+        .val((await funcStorageget('extensions.Youwatch.Visualization.strTheme')) || 'bw')
+        .on('change', async function() {
+            // let the background re-derive the stylesheet strings from the picked theme so the marks update on the next navigation
+            chrome.runtime.sendMessage({
+                'strMessage': 'themeApply',
+                'strTheme': jQuery(this).val(),
+            });
+        })
+    ;
+
     jQuery('#idVisualization_Fadeout')
         .on('click', async function() {
             await funcStorageset('extensions.Youwatch.Visualization.boolFadeout', await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(false));
@@ -665,39 +687,6 @@ jQuery(window.document).ready(async function() {
         .end()
     ;
 
-    jQuery('#idVisualization_Hideprogress')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolHideprogress', await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(false));
-
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolHideprogress') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
-
     jQuery('#idSearch_Query')
         .on('keydown', function(objEvent) {
             if (objEvent.keyCode === 13) {
@@ -847,6 +836,7 @@ jQuery(window.document).ready(async function() {
                                         .text((objVideo.intCount || 0) + ' completed view' + ((objVideo.intCount || 0) == 1 ? '' : 's'))
                                     )
                                     .append(jQuery('<div></div>')
+                                        .addClass('youwatch-statebadge')
                                         .css({
                                             'display': 'inline-block',
                                             'background-color': (objVideo.strState || 'watched') === 'watched' ? '#000000' : '#065fd4',
@@ -860,9 +850,64 @@ jQuery(window.document).ready(async function() {
                                     )
                                 )
                                 .append(jQuery('<div></div>')
+                                    .css({
+                                        'display': 'flex',
+                                        'gap': '12px',
+                                        'align-items': 'flex-start',
+                                    })
                                     .append(jQuery('<div></div>')
                                         .css({
                                             'cursor': 'pointer',
+                                            // only offer "mark as watched" for entries that are not already watched
+                                            'display': (objVideo.strState || 'watched') === 'watched' ? 'none' : 'block',
+                                        })
+                                        .attr({
+                                            'title': 'Mark as watched',
+                                        })
+                                        .append(jQuery('<i></i>')
+                                            .addClass('fa-regular')
+                                            .addClass('fa-circle-check')
+                                        )
+                                        .data({
+                                            'strIdent': objVideo.strIdent,
+                                            'strTitle': objVideo.strTitle,
+                                        })
+                                        .on('click', function() {
+                                            let objButton = jQuery(this);
+
+                                            chrome.runtime.sendMessage({
+                                                'strMessage': 'youtubeMark',
+                                                'strIdent': objButton.data('strIdent'),
+                                                'strTitle': objButton.data('strTitle'),
+                                                'strState': 'watched',
+                                                'boolConfirmed': true, // a manual mark is authoritative and should not be demoted later
+                                            }, function(objResponse) {
+                                                if ((objResponse === null) || (objResponse === undefined)) {
+                                                    return;
+                                                }
+
+                                                objButton
+                                                    .css({
+                                                        'display': 'none', // it is watched now, so the action no longer applies
+                                                    })
+                                                ;
+
+                                                objButton.parent().parent()
+                                                    .find('.youwatch-statebadge')
+                                                        .css({
+                                                            'background-color': '#000000',
+                                                        })
+                                                        .text('WATCHED')
+                                                ;
+                                            });
+                                        })
+                                    )
+                                    .append(jQuery('<div></div>')
+                                        .css({
+                                            'cursor': 'pointer',
+                                        })
+                                        .attr({
+                                            'title': 'Delete',
                                         })
                                         .append(jQuery('<i></i>')
                                             .addClass('fa-regular')
@@ -954,8 +999,49 @@ jQuery(window.document).ready(async function() {
     ;
 
     jQuery('#idLoading_Close')
-        .on('click', function() {
-            window.location.reload();
+        .on('click', async function() {
+            // hide the modal and refresh the stats in place instead of reloading the page (which would lose the scroll position)
+            jQuery('#idLoading_Container')
+                .css({
+                    'display': 'none',
+                })
+            ;
+
+            await funcRefreshstats();
+
+            // re-run the search from the top so the results reflect imports, synchronizations and deletions
+            jQuery('#idSearch_Lookup')
+                .data({
+                    'intSkip': 0,
+                })
+            ;
+
+            jQuery('#idSearch_Lookup').triggerHandler('click');
+
+            jQuery('#idLoading_Close')
+                .removeClass('disabled')
+            ;
         })
     ;
+
+    // let Enter dismiss the modal via its Close button (while it is open and the operation has finished); the capture
+    // phase keeps this from also triggering the search box's own Enter handler underneath the overlay
+    window.document.addEventListener('keydown', function(objEvent) {
+        if (objEvent.keyCode !== 13) {
+            return;
+        }
+
+        if (jQuery('#idLoading_Container').css('display') === 'none') {
+            return;
+        }
+
+        if (jQuery('#idLoading_Close').hasClass('disabled') === true) {
+            return; // the operation is still running, so closing is not allowed yet
+        }
+
+        objEvent.preventDefault();
+        objEvent.stopPropagation();
+
+        jQuery('#idLoading_Close').triggerHandler('click');
+    }, true);
 });

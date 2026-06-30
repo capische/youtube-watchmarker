@@ -49,6 +49,32 @@ let funcApplytheme = async function(strTheme) { // refresh the stylesheet string
     }
 };
 
+let funcDebugmark = function(strEvent, objVideo, objContext) {
+    console.debug('[YWM mark] ' + strEvent, {
+        'strIdent': objVideo.strIdent || '',
+        'strTitle': objVideo.strTitle || '',
+        'strSource': objVideo.strSource || 'unknown',
+        'strReason': objContext.strReason || '',
+        'boolNew': objContext.boolNew === true,
+        'boolStored': objContext.boolStored === true,
+        'strStateold': objContext.strStateold || '',
+        'strStatenew': objContext.strStatenew || '',
+        'strStaterequested': objVideo.strState || '',
+        'intPercentrequested': (objVideo.intPercent === undefined) ? null : objVideo.intPercent,
+        'intPercentstored': (objContext.intPercentstored === undefined) ? null : objContext.intPercentstored,
+        'intCountincrement': objContext.intCountincrement || 0,
+        'boolAssumed': objVideo.boolAssumed === true,
+        'boolOpened': objVideo.boolOpened === true,
+        'boolOpenedstored': objContext.boolOpened === true,
+        'boolResume': objVideo.boolResume === true,
+        'boolCompleted': objVideo.boolCompleted === true,
+        'boolConfirmed': objVideo.boolConfirmed === true,
+        'boolConfirmedstored': objContext.boolConfirmed === true,
+        'boolEnsure': objVideo.boolEnsure === true,
+        'intTimestamprequested': objVideo.intTimestamp || null,
+    });
+};
+
 // merges one video into the store and applies the watching/watched state rules
 // - boolConfirmed: the threshold was reached locally (a real completion here) - this is sticky and never demoted
 // - boolOpened: the video was opened/played in this browser with the extension active, so its live progress is authoritative
@@ -72,30 +98,38 @@ let funcRecord = async function(objStore, objVideo) {
     let boolConfirmed = boolConfirmedold || (objVideo.boolCompleted === true) || (objVideo.boolConfirmed === true);
 
     let strState = null;
+    let strReason = '';
 
     if (boolConfirmed === true) {
         strState = 'watched'; // a confirmed local completion is final
+        strReason = (objVideo.boolCompleted === true) ? 'local player crossed the watched threshold' : 'manual or previous confirmed watched mark is sticky';
 
     } else if (objVideo.boolAssumed === true) {
         if (boolOpened === true) {
             strState = strStateold; // opened here, so the local state wins over the history assumption
+            strReason = 'assumed history signal ignored because local opened state wins';
 
         } else if (objVideo.strState === 'watched') {
             strState = 'watched'; // the resume bar reached the threshold, or there is no bar at all (a short / a fully watched video / browser history)
+            strReason = 'assumed source reported watched or had no sub-threshold resume bar';
 
         } else if ((objVideo.intPercent !== undefined) && (objVideo.intPercent !== null)) {
             strState = 'watching'; // a fresh resume-bar reading below the threshold - only partially watched elsewhere
+            strReason = 'assumed source had a sub-threshold resume bar';
 
         } else {
             strState = boolNew ? 'watched' : strStateold; // no reading at all - a new history entry is assumed watched (shorts carry no bar), an existing one keeps its state
+            strReason = boolNew ? 'new assumed history entry had no progress reading, so it was treated as watched' : 'assumed history entry had no progress reading, so existing state was kept';
 
         }
 
     } else if ((objVideo.boolResume === true) && (strStateold === 'watched') && ((objVideo.intPercent || 0) >= 5)) {
         strState = 'watching'; // opening it resumed from the middle, so it was not actually finished elsewhere
+        strReason = 'resume progress from the middle showed the previous watched mark was only an assumption';
 
     } else {
         strState = ((strStateold === 'watched') || (objVideo.strState === 'watched')) ? 'watched' : 'watching';
+        strReason = (strState === 'watched') ? 'existing or requested state was watched' : 'no watched signal was present';
 
     }
 
@@ -133,7 +167,24 @@ let funcRecord = async function(objStore, objVideo) {
         'intCount': boolNew ? (strState === 'watched' ? 1 : 0) : ((objGet.intCount || 0) + intInc),
         'boolOpened': boolOpened,
         'boolConfirmed': boolConfirmed,
+        'strDebugSource': objVideo.strSource || (boolNew ? '' : (objGet.strDebugSource || '')),
+        'strDebugReason': strReason,
+        'intDebugTimestamp': new Date().getTime(),
     };
+
+    if (objResult.strState === 'watched') {
+        funcDebugmark('watched decision', objVideo, {
+            'strReason': strReason,
+            'boolNew': boolNew,
+            'boolStored': !((strIdent.trim() === '') || (objResult.strTitle.trim() === '')),
+            'strStateold': strStateold,
+            'strStatenew': strState,
+            'intPercentstored': objResult.intPercent,
+            'intCountincrement': intInc,
+            'boolOpened': boolOpened,
+            'boolConfirmed': boolConfirmed,
+        });
+    }
 
     if ((strIdent.trim() === '') || (objResult.strTitle.trim() === '')) {
         return {
@@ -665,6 +716,7 @@ let Database = {
                 'intCount': objVideo.intCount,
                 'boolOpened': objVideo.boolOpened === true,
                 'boolConfirmed': objVideo.boolConfirmed === true,
+                'strSource': 'database-import',
             });
 
             // imports carry an explicit historical count so preserve the larger of the two
@@ -772,6 +824,7 @@ let History = {
                 'strTitle': strTitle,
                 'strState': 'watched',
                 'boolAssumed': true,
+                'strSource': 'browser-history-import',
             });
 
             funcProgress({
@@ -894,6 +947,7 @@ let Youtube = {
                     'strState': strState,
                     'intPercent': intPercent,
                     'boolAssumed': true,
+                    'strSource': 'youtube-history-sync',
                 });
 
                 funcProgress({
@@ -935,6 +989,9 @@ let Youtube = {
             'strState': objGet.strState || 'watched',
             'intPercent': (objGet.strState || 'watched') === 'watched' ? 100 : (objGet.intPercent || 0),
             'intCount': objGet.intCount || 0,
+            'strDebugSource': objGet.strDebugSource || '',
+            'strDebugReason': objGet.strDebugReason || '',
+            'intDebugTimestamp': objGet.intDebugTimestamp || 0,
         };
     },
 
@@ -949,6 +1006,17 @@ let Youtube = {
         // an assumed (watched elsewhere, never confirmed here) watched back to watching
         if ((objGet !== undefined) && (objGet !== null) && (objRequest.boolEnsure === true) && ((objGet.strState || 'watched') === 'watched') && (objRequest.boolCompleted !== true)) {
             if ((objGet.boolConfirmed === true) || (objRequest.boolResume !== true)) {
+                funcDebugmark('watched skip', objRequest, {
+                    'strReason': objGet.boolConfirmed === true ? 'existing watched mark is confirmed and sticky' : 'existing watched mark already satisfies lightweight ensure signal',
+                    'boolNew': false,
+                    'boolStored': false,
+                    'strStateold': objGet.strState || 'watched',
+                    'strStatenew': objGet.strState || 'watched',
+                    'intPercentstored': (objGet.strState || 'watched') === 'watched' ? 100 : (objGet.intPercent || 0),
+                    'intCountincrement': 0,
+                    'boolOpened': objGet.boolOpened === true,
+                    'boolConfirmed': objGet.boolConfirmed === true,
+                });
                 return null;
             }
         }
@@ -964,6 +1032,8 @@ let Youtube = {
             'boolResume': objRequest.boolResume === true,
             'boolAssumed': objRequest.boolAssumed === true,
             'boolConfirmed': objRequest.boolConfirmed === true,
+            'boolEnsure': objRequest.boolEnsure === true,
+            'strSource': objRequest.strSource || 'youtube-mark',
         });
 
         await funcStorageset('extensions.Youwatch.Database.intSize', await objDatabase.count());
@@ -1372,6 +1442,7 @@ let Search = {
                 'boolAssumed': objRequest.boolAssumed === true, // a watched coming from the youtube history page
                 'boolConfirmed': objRequest.boolConfirmed === true, // an explicit "mark as watched" that should stick
                 'boolEnsure': objRequest.boolEnsure,
+                'strSource': objRequest.strSource || (objRequest.boolConfirmed === true ? 'manual-mark' : (objRequest.boolAssumed === true ? 'youtube-history-page' : 'youtube-mark-message')),
             }).then(funcResponse);
 
             return true; // indicate async response, i also tried using an async function with await but could not make it work
@@ -1389,6 +1460,7 @@ let Search = {
                 'strState': 'watched',
                 'boolCompleted': true,
                 'boolOpened': true,
+                'strSource': 'player-threshold-complete',
             }).then(function(objResult) {
                 funcBroadcast(objResult);
 
@@ -1412,6 +1484,7 @@ let Search = {
                 'boolOpened': true,
                 'boolResume': objRequest.boolResume === true,
                 'boolEnsure': true,
+                'strSource': 'player-progress',
             }).then(function(objResult) {
                 funcBroadcast(objResult);
 
@@ -1442,6 +1515,7 @@ let Search = {
                                     'intPercent': objRequest.intPercent,
                                     'boolResume': strState === 'watching',
                                     'boolEnsure': objRequest.boolEnsure,
+                                    'strSource': 'thumbnail-progress',
                                 }).then(function(objResult) {
                                     funcBroadcast(objResult);
 
@@ -1484,6 +1558,7 @@ let Search = {
                         'strState': 'watching',
                         'boolOpened': true,
                         'boolEnsure': true,
+                        'strSource': 'tab-open',
                     });
 
                     funcBroadcast(objResult);
@@ -1556,6 +1631,7 @@ let Search = {
                     'strState': 'watching',
                     'boolOpened': true,
                     'boolEnsure': true,
+                    'strSource': 'watchtime-ping',
                 });
 
                 funcBroadcast(objResult);

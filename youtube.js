@@ -4,6 +4,7 @@ let strLastchange = null;
 let objVideodata = {}; // strIdent -> { intTimestamp, strState, intPercent, intCount }
 let objCompleted = {}; // strIdent -> true once the active player has crossed the threshold in this session
 let objReported = {}; // strIdent -> last whole percent we reported to the background while watching
+let objDebugmarked = {}; // de-duplicates watched badge debug output for the same stored decision
 let intThreshold = 95; // the percentage of a video that counts as watched, kept in sync with the settings
 let boolYouhist = true; // whether videos shown on the youtube history page should be marked as watched
 let objObservers = new WeakMap();
@@ -169,6 +170,9 @@ let refresh = async function() {
                 'strState': objResponse.strState || 'watched',
                 'intPercent': objResponse.intPercent || 0,
                 'intCount': objResponse.intCount || 0,
+                'strDebugSource': objResponse.strDebugSource || '',
+                'strDebugReason': objResponse.strDebugReason || '',
+                'intDebugTimestamp': objResponse.intDebugTimestamp || 0,
             };
 
             for (let objVideo of videos(objResponse.strIdent)) {
@@ -217,6 +221,25 @@ let mark = function(objVideo, strIdent) {
 
         let objData = objVideodata[strIdent];
         let boolWatched = objData.strState === 'watched';
+
+        if (boolWatched === true) {
+            let strDebugkey = strIdent + ':' + (objData.intDebugTimestamp || 0) + ':' + (objData.strDebugSource || '') + ':' + (objData.strDebugReason || '');
+
+            if (objDebugmarked[strDebugkey] !== true) {
+                objDebugmarked[strDebugkey] = true;
+
+                console.debug('[YWM mark] watched badge', {
+                    'strIdent': strIdent,
+                    'strSource': objData.strDebugSource || 'stored-lookup',
+                    'strReason': objData.strDebugReason || 'stored state is watched',
+                    'intDebugTimestamp': objData.intDebugTimestamp || 0,
+                    'intTimestamp': objData.intTimestamp || 0,
+                    'intPercent': objData.intPercent || 0,
+                    'intCount': objData.intCount || 0,
+                    'strUrl': objVideo.href || '',
+                });
+            }
+        }
 
         objVideo.classList.add('youwatch-mark');
         objVideo.classList.toggle('youwatch-watched', boolWatched);

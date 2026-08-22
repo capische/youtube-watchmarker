@@ -4,6 +4,10 @@ let objDatabase = chrome.runtime.connect({
     'name': 'database',
 });
 
+let objWatchlist = chrome.runtime.connect({
+    'name': 'watchlist',
+});
+
 let objHistory = chrome.runtime.connect({
     'name': 'history',
 });
@@ -30,13 +34,215 @@ let funcStorageset = async function(strKey, objValue) {
      await chrome.storage.local.set({ [strKey]: String(objValue) });
 };
 
-// re-render the database size and the synchronization timestamps from storage - used on load and after any operation
+let funcBackupname = function(strExtension) {
+    return new Date().getFullYear() + '.' + ('0' + (new Date().getMonth() + 1)).slice(-2) + '.' + ('0' + new Date().getDate()).slice(-2) + '.' + strExtension;
+};
+
+let funcEncodebackup = function(objValue) {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(objValue))));
+};
+
+let funcDecodebackup = function(strValue) {
+    return JSON.parse(decodeURIComponent(escape(atob(strValue))));
+};
+
+let funcPortrequest = async function(objPort, strMessage, objRequest, funcProgress) {
+    return await new Promise(function(funcResolve) {
+        const funcListener = function(objData) {
+            if (objData.strMessage === strMessage) {
+                objPort.onMessage.removeListener(funcListener);
+                funcResolve(objData.objResponse);
+
+            } else if (objData.strMessage === strMessage + '-progress') {
+                if (funcProgress !== undefined) {
+                    funcProgress(objData.objResponse);
+                }
+            }
+        };
+
+        objPort.onMessage.addListener(funcListener);
+
+        objPort.postMessage({
+            'strMessage': strMessage,
+            'objRequest': objRequest,
+        });
+    });
+};
+
+let funcShowloading = function(strMessage) {
+    jQuery('#idLoading_Container')
+        .css({
+            'display': 'block',
+        })
+    ;
+
+    jQuery('#idLoading_Message')
+        .text(strMessage)
+    ;
+
+    jQuery('#idLoading_Progress')
+        .text('...')
+    ;
+
+    jQuery('#idLoading_Close')
+        .addClass('disabled')
+    ;
+};
+
+let funcFinishloading = function(strMessage) {
+    jQuery('#idLoading_Message')
+        .text(strMessage)
+    ;
+
+    jQuery('#idLoading_Close')
+        .removeClass('disabled')
+    ;
+};
+
+let funcProgress = function(strPrefix) {
+    return function(objResponse) {
+        jQuery('#idLoading_Progress')
+            .text(strPrefix + ': ' + objResponse.strProgress)
+        ;
+    };
+};
+
+let funcSynclistener = function(objPort, strMessage, strLabel) { // the sync ports all report completion and progress with the same message shape
+    objPort.onMessage.addListener(function(objData) {
+        if (objData.strMessage === strMessage) {
+            funcFinishloading((objData.objResponse === null ? 'error synchronizing ' : 'finished synchronizing ') + strLabel);
+
+        } else if (objData.strMessage === strMessage + '-progress') {
+            jQuery('#idLoading_Progress')
+                .text(objData.objResponse.strProgress)
+            ;
+
+        }
+    });
+};
+
+let funcBindtoggle = async function(strSelector, strKey) { // an on/off switch: flip the stored bool on click and keep the two <i> icons in sync
+    let funcIcons = function(boolValue) {
+        jQuery(strSelector)
+            .find('i')
+                .eq(0)
+                    .css({
+                        'display': boolValue === true ? 'none' : 'block',
+                    })
+                .end()
+                .eq(1)
+                    .css({
+                        'display': boolValue === true ? 'block' : 'none',
+                    })
+                .end()
+            .end()
+        ;
+    };
+
+    jQuery(strSelector)
+        .on('click', async function() {
+            let boolValue = await funcStorageget(strKey) === String(false);
+
+            await funcStorageset(strKey, boolValue);
+
+            funcIcons(boolValue);
+        })
+    ;
+
+    funcIcons(await funcStorageget(strKey) === String(true));
+};
+
+let funcWatchmarkervideos = function(objBackup, boolLegacyarray) {
+    if ((boolLegacyarray === true) && (Array.isArray(objBackup) === true)) {
+        return objBackup;
+    }
+
+    if (Array.isArray((objBackup || {}).objVideos) === true) {
+        return objBackup.objVideos;
+    }
+
+    if (Array.isArray(((objBackup || {}).objWatchmarker || {}).objVideos) === true) {
+        return objBackup.objWatchmarker.objVideos;
+    }
+
+    return null;
+};
+
+let funcWatchlistitems = function(objBackup, boolLegacyarray) {
+    if ((boolLegacyarray === true) && (Array.isArray(objBackup) === true)) {
+        return objBackup;
+    }
+
+    if (Array.isArray((objBackup || {}).objItems) === true) {
+        return objBackup.objItems;
+    }
+
+    if (Array.isArray(((objBackup || {}).objWatchlist || {}).objItems) === true) {
+        return objBackup.objWatchlist.objItems;
+    }
+
+    return null;
+};
+
+let funcImportbackup = async function(objBackup, boolDatabaselegacy, boolWatchlistlegacy) {
+    const objVideos = funcWatchmarkervideos(objBackup, boolDatabaselegacy);
+    const objItems = funcWatchlistitems(objBackup, boolWatchlistlegacy);
+
+    if ((objVideos === null) && (objItems === null)) {
+        return false;
+    }
+
+    if (objVideos !== null) {
+        jQuery('#idLoading_Message')
+            .text('importing Watchmarker')
+        ;
+
+        const objResponse = await funcPortrequest(objDatabase, 'databaseImport', {
+            'objVideos': objVideos,
+        }, funcProgress('Watchmarker'));
+
+        if (objResponse === null) {
+            return false;
+        }
+    }
+
+    if (objItems !== null) {
+        jQuery('#idLoading_Message')
+            .text('importing Watchlist')
+        ;
+
+        const objResponse = await funcPortrequest(objWatchlist, 'watchlistImport', {
+            'objItems': objItems,
+        }, funcProgress('Watchlist'));
+
+        if (objResponse === null) {
+            return false;
+        }
+    }
+
+    await funcRefreshstats();
+
+    return true;
+};
+
+// re-render the database and watchlist sizes and the synchronization timestamps from storage - used on load and after any operation
 let funcRefreshstats = async function() {
     let strSize = await funcStorageget('extensions.Youwatch.Database.intSize');
 
     if (strSize !== null) {
         jQuery('#idDatabase_Size').text(parseInt(strSize));
     }
+
+    let objStorage = await chrome.storage.local.get('extensions.Youwatch.Watchlist.objItems');
+    let objItems = objStorage['extensions.Youwatch.Watchlist.objItems'];
+
+    if (Array.isArray(objItems) === false) {
+        objItems = [];
+    }
+
+    jQuery('#idWatchlist_Size').text(objItems.filter(function(objItem) {
+        return (objItem !== null) && (objItem !== undefined) && (typeof objItem.strIdent === 'string') && (objItem.strIdent.length === 11);
+    }).length);
 
     let strHistory = await funcStorageget('extensions.Youwatch.History.intTimestamp');
 
@@ -67,123 +273,67 @@ jQuery(window.document).ready(async function() {
     });
 
     jQuery('#idDatabase_Export')
-        .on('click', function() {
-            jQuery('#idLoading_Container')
-                .css({
-                    'display': 'block',
-                })
-            ;
+        .on('click', async function() {
+            funcShowloading('exporting Watchmarker + Watchlist');
 
-            jQuery('#idLoading_Message')
-                .text('exporting database')
-            ;
+            const objDatabaseResponse = await funcPortrequest(objDatabase, 'databaseExport', {}, funcProgress('Watchmarker'));
 
-            jQuery('#idLoading_Progress')
-                .text('...')
-            ;
+            if (objDatabaseResponse === null) {
+                funcFinishloading('error exporting Watchmarker');
+                return;
+            }
 
-            jQuery('#idLoading_Close')
-                .addClass('disabled')
-            ;
+            const objWatchlistResponse = await funcPortrequest(objWatchlist, 'watchlistExport', {}, funcProgress('Watchlist'));
 
-            objDatabase.postMessage({
-                'strMessage': 'databaseExport',
-                'objRequest': {},
-            });
-        })
-        .each(function() {
-            objDatabase.onMessage.addListener(function(objData) {
-                if (objData.strMessage === 'databaseExport') {
-                    if (objData.objResponse === null) {
-                        jQuery('#idLoading_Message')
-                            .text('error exporting database')
-                        ;
+            if (objWatchlistResponse === null) {
+                funcFinishloading('error exporting Watchlist');
+                return;
+            }
 
-                    } else if (objData.objResponse !== null) {
-                        jQuery('#idLoading_Message')
-                            .text('finished exporting database')
-                        ;
+            download(funcEncodebackup({
+                'strType': 'watchmarker-combined',
+                'intVersion': 1,
+                'objWatchmarker': {
+                    'objVideos': objDatabaseResponse.objVideos || [],
+                },
+                'objWatchlist': {
+                    'objItems': objWatchlistResponse.objItems || [],
+                },
+            }), funcBackupname('watchmarker'), 'application/octet-stream');
 
-                        download(btoa(unescape(encodeURIComponent(JSON.stringify(objData.objResponse.objVideos)))), new Date().getFullYear() + '.' + ('0' + (new Date().getMonth() + 1)).slice(-2) + '.' + ('0' + new Date().getDate()).slice(-2) + '.database', 'application/octet-stream');
-                    }
-
-                    jQuery('#idLoading_Close')
-                        .removeClass('disabled')
-                    ;
-
-                } else if (objData.strMessage === 'databaseExport-progress') {
-                    jQuery('#idLoading_Progress')
-                        .text(objData.objResponse.strProgress)
-                    ;
-
-                }
-            });
+            funcFinishloading('finished exporting Watchmarker + Watchlist');
         })
     ;
 
     jQuery('#idDatabase_Import').find('input')
         .on('change', function() {
-            jQuery('#idLoading_Container')
-                .css({
-                    'display': 'block',
-                })
-            ;
-
-            jQuery('#idLoading_Message')
-                .text('importing database')
-            ;
-
-            jQuery('#idLoading_Progress')
-                .text('...')
-            ;
-
-            jQuery('#idLoading_Close')
-                .addClass('disabled')
-            ;
-
             let objFilereader = new FileReader();
+            let strFilename = '';
 
-            objFilereader.onload = function(objEvent) {
-                objDatabase.postMessage({
-                    'strMessage': 'databaseImport',
-                    'objRequest': {
-                        'objVideos': JSON.parse(decodeURIComponent(escape(atob(objEvent.target.result)))),
-                    },
-                });
+            objFilereader.onload = async function(objEvent) {
+                funcShowloading('importing Watchmarker + Watchlist');
+
+                try {
+                    const boolWatchlist = /\.watchlist$/i.test(strFilename);
+
+                    if (await funcImportbackup(funcDecodebackup(objEvent.target.result), boolWatchlist !== true, boolWatchlist) === true) {
+                        funcFinishloading('finished importing Watchmarker + Watchlist');
+
+                    } else {
+                        funcFinishloading('error importing Watchmarker + Watchlist');
+                    }
+                } catch (objError) {
+                    funcFinishloading('error importing Watchmarker + Watchlist');
+                }
             };
 
             if (jQuery('#idDatabase_Import').find('input').get(0).files !== undefined) {
                 if (jQuery('#idDatabase_Import').find('input').get(0).files.length === 1) {
-                    objFilereader.readAsText(jQuery('#idDatabase_Import').find('input').get(0).files[0], 'utf-8');
+                    const objFile = jQuery('#idDatabase_Import').find('input').get(0).files[0];
+                    strFilename = objFile.name || '';
+                    objFilereader.readAsText(objFile, 'utf-8');
                 }
             }
-        })
-        .each(function() {
-            objDatabase.onMessage.addListener(function(objData) {
-                if (objData.strMessage === 'databaseImport') {
-                    if (objData.objResponse === null) {
-                        jQuery('#idLoading_Message')
-                            .text('error importing database')
-                        ;
-
-                    } else if (objData.objResponse !== null) {
-                        jQuery('#idLoading_Message')
-                            .text('finished importing database')
-                        ;
-
-                    }
-
-                    jQuery('#idLoading_Close')
-                        .removeClass('disabled')
-                    ;
-
-                } else if (objData.strMessage === 'databaseImport-progress') {
-                    jQuery('#idLoading_Progress')
-                        .text(objData.objResponse.strProgress)
-                    ;
-
-                }
-            });
         })
     ;
 
@@ -204,42 +354,56 @@ jQuery(window.document).ready(async function() {
     ;
 
     jQuery('#idDatabase_Resyes')
-        .on('click', function() {
-            objDatabase.postMessage({
-                'strMessage': 'databaseReset',
-                'objRequest': {},
-            });
+        .on('click', async function() {
+            await funcPortrequest(objDatabase, 'databaseReset', {});
+            window.location.reload();
         })
-        .each(function() {
-            objDatabase.onMessage.addListener(function(objData) {
-                if (objData.strMessage === 'databaseReset') {
-                    window.location.reload();
-                }
-            });
+    ;
+
+    jQuery('#idWatchlist_Reset')
+        .on('click', function() {
+            jQuery(this)
+                .css({
+                    'display': 'none',
+                })
+            ;
+
+            jQuery('#idWatchlist_Resyes').closest('.input-group')
+                .css({
+                    'display': 'inline',
+                })
+            ;
+        })
+    ;
+
+    jQuery('#idWatchlist_Resyes')
+        .on('click', async function() {
+            await funcPortrequest(objWatchlist, 'watchlistReset', {});
+            window.location.reload();
         })
     ;
 
     await funcRefreshstats();
 
     jQuery('#idHistory_Synchronize')
-        .on('click', function() {
-            jQuery('#idLoading_Container')
-                .css({
-                    'display': 'block',
-                })
-            ;
+        .on('click', async function() {
+            funcShowloading('synchronizing history');
 
-            jQuery('#idLoading_Message')
-                .text('synchronizing history')
-            ;
+            if (await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') !== String(true)) {
+                jQuery('#idLoading_Message')
+                    .text('Firefox history sync is paused')
+                ;
 
-            jQuery('#idLoading_Progress')
-                .text('...')
-            ;
+                jQuery('#idLoading_Progress')
+                    .text('Enable it in Condition settings before running this sync.')
+                ;
 
-            jQuery('#idLoading_Close')
-                .addClass('disabled')
-            ;
+                jQuery('#idLoading_Close')
+                    .removeClass('disabled')
+                ;
+
+                return;
+            }
 
             objHistory.postMessage({
                 'strMessage': 'historySynchronize',
@@ -248,54 +412,13 @@ jQuery(window.document).ready(async function() {
                 },
             });
         })
-        .each(function() {
-            objHistory.onMessage.addListener(function(objData) {
-                if (objData.strMessage === 'historySynchronize') {
-                    if (objData.objResponse === null) {
-                        jQuery('#idLoading_Message')
-                            .text('error synchronizing history')
-                        ;
-
-                    } else if (objData.objResponse !== null) {
-                        jQuery('#idLoading_Message')
-                            .text('finished synchronizing history')
-                        ;
-
-                    }
-
-                    jQuery('#idLoading_Close')
-                        .removeClass('disabled')
-                    ;
-
-                } else if (objData.strMessage === 'historySynchronize-progress') {
-                    jQuery('#idLoading_Progress')
-                        .text(objData.objResponse.strProgress)
-                    ;
-
-                }
-            });
-        })
     ;
+
+    funcSynclistener(objHistory, 'historySynchronize', 'history');
 
     jQuery('#idYoutube_Synchronize')
         .on('click', function() {
-            jQuery('#idLoading_Container')
-                .css({
-                    'display': 'block',
-                })
-            ;
-
-            jQuery('#idLoading_Message')
-                .text('synchronizing youtube')
-            ;
-
-            jQuery('#idLoading_Progress')
-                .text('...')
-            ;
-
-            jQuery('#idLoading_Close')
-                .addClass('disabled')
-            ;
+            funcShowloading('synchronizing youtube');
 
             objYoutube.postMessage({
                 'strMessage': 'youtubeSynchronize',
@@ -304,204 +427,24 @@ jQuery(window.document).ready(async function() {
                 },
             });
         })
-        .each(function() {
-            objYoutube.onMessage.addListener(function(objData) {
-                if (objData.strMessage === 'youtubeSynchronize') {
-                    if (objData.objResponse === null) {
-                        jQuery('#idLoading_Message')
-                            .text('error synchronizing youtube')
-                        ;
-
-                    } else if (objData.objResponse !== null) {
-                        jQuery('#idLoading_Message')
-                            .text('finished synchronizing youtube')
-                        ;
-
-                    }
-
-                    jQuery('#idLoading_Close')
-                        .removeClass('disabled')
-                    ;
-
-                } else if (objData.strMessage === 'youtubeSynchronize-progress') {
-                    jQuery('#idLoading_Progress')
-                        .text(objData.objResponse.strProgress)
-                    ;
-
-                }
-            });
-        })
     ;
 
-    jQuery('#idCondition_Brownav')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Condition.boolBrownav', await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(false));
+    funcSynclistener(objYoutube, 'youtubeSynchronize', 'youtube');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idCondition_Brownav', 'extensions.Youwatch.Condition.boolBrownav');
 
-    jQuery('#idCondition_Browhist')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Condition.boolBrowhist', await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === String(false));
+    await funcBindtoggle('#idCondition_Browhist', 'extensions.Youwatch.Condition.boolBrowhist');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idCondition_Youprog', 'extensions.Youwatch.Condition.boolYouprog');
 
-    jQuery('#idCondition_Youprog')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Condition.boolYouprog', await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === String(false));
+    await funcBindtoggle('#idCondition_Youbadge', 'extensions.Youwatch.Condition.boolYoubadge');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
-
-    jQuery('#idCondition_Youbadge')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Condition.boolYoubadge', await funcStorageget('extensions.Youwatch.Condition.boolYoubadge') === String(false));
-
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYoubadge') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYoubadge') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYoubadge') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYoubadge') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
-
-    jQuery('#idCondition_Youhist')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Condition.boolYouhist', await funcStorageget('extensions.Youwatch.Condition.boolYouhist') === String(false));
-
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYouhist') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Condition.boolYouhist') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYouhist') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Condition.boolYouhist') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idCondition_Youhist', 'extensions.Youwatch.Condition.boolYouhist');
 
     jQuery('#idCondition_Threshold')
-        .val(parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 95)
+        .val(parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 99)
         .on('change', async function() {
-            let intThreshold = Math.max(1, Math.min(100, parseInt(jQuery(this).val()) || 95));
+            let intThreshold = Math.max(1, Math.min(100, parseInt(jQuery(this).val()) || 99));
 
             jQuery(this)
                 .val(intThreshold)
@@ -522,170 +465,17 @@ jQuery(window.document).ready(async function() {
         })
     ;
 
-    jQuery('#idVisualization_Fadeout')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolFadeout', await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(false));
+    await funcBindtoggle('#idVisualization_Fadeout', 'extensions.Youwatch.Visualization.boolFadeout');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idVisualization_Grayout', 'extensions.Youwatch.Visualization.boolGrayout');
 
-    jQuery('#idVisualization_Grayout')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolGrayout', await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(false));
+    await funcBindtoggle('#idVisualization_Showbadge', 'extensions.Youwatch.Visualization.boolShowbadge');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idVisualization_Showwatching', 'extensions.Youwatch.Visualization.boolShowwatching');
 
-    jQuery('#idVisualization_Showbadge')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolShowbadge', await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(false));
+    await funcBindtoggle('#idVisualization_Showdate', 'extensions.Youwatch.Visualization.boolShowdate');
 
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
-
-    jQuery('#idVisualization_Showwatching')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolShowwatching', await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(false));
-
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
-
-    jQuery('#idVisualization_Showdate')
-        .on('click', async function() {
-            await funcStorageset('extensions.Youwatch.Visualization.boolShowdate', await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(false));
-
-            jQuery(this)
-                .find('i')
-                    .eq(0)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(true) ? 'none' : 'block',
-                        })
-                    .end()
-                    .eq(1)
-                        .css({
-                            'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(true) ? 'block' : 'none',
-                        })
-                    .end()
-                .end()
-            ;
-        })
-        .find('i')
-            .eq(0)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(true) ? 'none' : 'block',
-                })
-            .end()
-            .eq(1)
-                .css({
-                    'display': await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(true) ? 'block' : 'none',
-                })
-            .end()
-        .end()
-    ;
+    await funcBindtoggle('#idVisualization_Showcount', 'extensions.Youwatch.Visualization.boolShowcount');
 
     jQuery('#idSearch_Query')
         .on('keydown', function(objEvent) {
@@ -839,14 +629,14 @@ jQuery(window.document).ready(async function() {
                                         .addClass('youwatch-statebadge')
                                         .css({
                                             'display': 'inline-block',
-                                            'background-color': (objVideo.strState || 'watched') === 'watched' ? '#000000' : '#065fd4',
+                                            'background-color': (objVideo.strState || 'watching') === 'watched' ? '#000000' : '#065fd4',
                                             'border-radius': '2px',
                                             'color': '#FFFFFF',
                                             'font-size': '11px',
                                             'margin': '7px 0px 0px 0px',
                                             'padding': '3px 6px 3px 6px',
                                         })
-                                        .text((objVideo.strState || 'watched') === 'watched' ? 'WATCHED' : ('WATCHING' + ((objVideo.intPercent > 0) ? (' ' + objVideo.intPercent + '%') : '')))
+                                        .text((objVideo.strState || 'watching') === 'watched' ? 'WATCHED' : ('WATCHING' + ((objVideo.intPercent > 0) ? (' ' + objVideo.intPercent + '%') : '')))
                                     )
                                 )
                                 .append(jQuery('<div></div>')
@@ -859,7 +649,7 @@ jQuery(window.document).ready(async function() {
                                         .css({
                                             'cursor': 'pointer',
                                             // only offer "mark as watched" for entries that are not already watched
-                                            'display': (objVideo.strState || 'watched') === 'watched' ? 'none' : 'block',
+                                            'display': (objVideo.strState || 'watching') === 'watched' ? 'none' : 'block',
                                         })
                                         .attr({
                                             'title': 'Mark as watched',
@@ -917,23 +707,7 @@ jQuery(window.document).ready(async function() {
                                             'strIdent': objVideo.strIdent,
                                         })
                                         .on('click', function() {
-                                            jQuery('#idLoading_Container')
-                                                .css({
-                                                    'display': 'block',
-                                                })
-                                            ;
-
-                                            jQuery('#idLoading_Message')
-                                                .text('deleting video')
-                                            ;
-
-                                            jQuery('#idLoading_Progress')
-                                                .text('...')
-                                            ;
-
-                                            jQuery('#idLoading_Close')
-                                                .addClass('disabled')
-                                            ;
+                                            funcShowloading('deleting video');
 
                                             objSearch.postMessage({
                                                 'strMessage': 'searchDelete',
@@ -974,7 +748,7 @@ jQuery(window.document).ready(async function() {
                             .text('error deleting video')
                         ;
 
-                    } else if (objData.objResponse !== null) {
+                    } else {
                         jQuery('#idLoading_Message')
                             .text('finished deleting video')
                         ;

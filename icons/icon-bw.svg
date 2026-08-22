@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <style>
+        .bm { stroke: #2b2b2b; }
+        .pl { fill: #2b2b2b; }
+        @media (prefers-color-scheme: dark) {
+            .bm { stroke: #f2f2f2; }
+            .pl { fill: #f2f2f2; }
+        }
+    </style>
+    <g transform="translate(12 12) scale(1.25) translate(-12 -12)">
+        <path class="bm" stroke-width="1.6" d="M6 5.5 a2 2 0 0 1 2 -2 h8 a2 2 0 0 1 2 2 v15 l-6 -4.5 l-6 4.5 z" />
+        <path class="pl" d="M10.2 7.5 l4.6 2.9 l-4.6 2.9 z" />
+    </g>
+</svg>

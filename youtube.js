@@ -1,17 +1,31 @@
 'use strict';
 
-let strLastchange = null;
+let boolDirty = true; // set by the mutation observer whenever the dom changes (new thumbnails, spa navigation) so the polling loop knows a rescan is worthwhile
+let strLastnav = null; // the href + title the polling loop last acted on, to catch navigations that do not mutate the dom
 let objVideodata = {}; // strIdent -> { intTimestamp, strState, intPercent, intCount }
 let objCompleted = {}; // strIdent -> true once the active player has crossed the threshold in this session
 let objReported = {}; // strIdent -> last whole percent we reported to the background while watching
+let objReporttime = {}; // strIdent -> last timestamp we reported while the player was active
 let objDebugmarked = {}; // de-duplicates watched badge debug output for the same stored decision
-let intThreshold = 95; // the percentage of a video that counts as watched, kept in sync with the settings
+let objDebughistory = {}; // de-duplicates missing history progress diagnostics
+let objHistoryharvested = new WeakSet(); // history thumbnails whose resume bar has already been read once - a bar is only
+// fresh when its element first renders (page load / scrolled in); later rescans of the same element (tab re-activation,
+// dom mutations) would re-read a stale bar and could wrongly re-mark or demote, so those become plain lookups instead
+let strHistorymenuident = null; // video id for the history row whose youtube menu was last opened
+let intHistorymenutime = 0;
+let objHistoryremoved = {}; // de-duplicates native youtube history removal messages
+let objActivelookups = {}; // strIdent -> true while the active player state lookup is in flight
+let objActivelabelmisses = {}; // strIdent -> true after an active player lookup found no stored state
+let objActivelabelsuppressed = {}; // strIdent -> true after playback starts in this page session
+let objActiveplaylisteners = new WeakSet();
+let objActivelabel = null;
+let intThreshold = 99; // the percentage of a video that counts as watched, kept in sync with the settings
 let boolYouhist = true; // whether videos shown on the youtube history page should be marked as watched
 let objObservers = new WeakMap();
 let objHovers = new WeakSet();
 
 chrome.storage.local.get(['extensions.Youwatch.Condition.intThreshold', 'extensions.Youwatch.Condition.boolYouhist'], function(objValue) {
-    intThreshold = parseInt(objValue['extensions.Youwatch.Condition.intThreshold']) || 95;
+    intThreshold = parseInt(objValue['extensions.Youwatch.Condition.intThreshold']) || 99;
     boolYouhist = objValue['extensions.Youwatch.Condition.boolYouhist'] !== String(false);
 });
 
@@ -21,7 +35,7 @@ chrome.storage.onChanged.addListener(function(objChanges, strArea) {
     }
 
     if (objChanges.hasOwnProperty('extensions.Youwatch.Condition.intThreshold') === true) {
-        intThreshold = parseInt(objChanges['extensions.Youwatch.Condition.intThreshold'].newValue) || 95;
+        intThreshold = parseInt(objChanges['extensions.Youwatch.Condition.intThreshold'].newValue) || 99;
     }
 
     if (objChanges.hasOwnProperty('extensions.Youwatch.Condition.boolYouhist') === true) {
@@ -31,22 +45,26 @@ chrome.storage.onChanged.addListener(function(objChanges, strArea) {
 
 // ##########################################################
 
+let objVideoselectors = [ // %IDENT% is replaced with a video id, or with nothing to match every video
+    'a.ytLockupViewModelContentImage[href^="/watch?v=%IDENT%"]', // new - https://github.com/sniklaus/youtube-watchmarker/issues/195
+    'a.yt-lockup-view-model__content-image[href^="/watch?v=%IDENT%"]', // old
+    'a.ytd-thumbnail[href^="/watch?v=%IDENT%"]', // list
+    'a.reel-item-endpoint[href^="/shorts/%IDENT%"]', // shorts
+    'a.shortsLockupViewModelHostEndpoint[href*="/shorts/%IDENT%"]', // shorts lockup
+    'a.ytLockupViewModelContentImage[href^="/shorts/%IDENT%"]', // shorts in lockup
+    'a.yt-lockup-view-model__content-image[href^="/shorts/%IDENT%"]', // shorts in lockup
+    'a.ytd-thumbnail[href^="/shorts/%IDENT%"]', // shorts in list
+    'a.ytp-modern-videowall-still[href*="/watch?v=%IDENT%"]', // videowall
+    'a.ytp-videowall-still[href*="/watch?v=%IDENT%"]', // videowall
+    'a.ytp-ce-covering-overlay[href*="/watch?v=%IDENT%"]', // overlays
+    'a.media-item-thumbnail-container[href*="/watch?v=%IDENT%"]', // mobile
+    'a.YtmCompactMediaItemImage[href*="/watch?v=%IDENT%"]', // mobile
+].join(', ');
+
+let strVideoselectorall = objVideoselectors.split('%IDENT%').join(''); // the match-every-video form runs on each rescan tick, so build it once
+
 let videos = function(strIdent) {
-    return Array.from(window.document.querySelectorAll(([
-        'a.ytLockupViewModelContentImage[href^="/watch?v=' + strIdent + '"]', // new - https://github.com/sniklaus/youtube-watchmarker/issues/195
-        'a.yt-lockup-view-model__content-image[href^="/watch?v=' + strIdent + '"]', // old
-        'a.ytd-thumbnail[href^="/watch?v=' + strIdent + '"]', // list
-        'a.reel-item-endpoint[href^="/shorts/' + strIdent + '"]', // shorts
-        'a.shortsLockupViewModelHostEndpoint[href*="/shorts/' + strIdent + '"]', // shorts lockup
-        'a.ytLockupViewModelContentImage[href^="/shorts/' + strIdent + '"]', // shorts in lockup
-        'a.yt-lockup-view-model__content-image[href^="/shorts/' + strIdent + '"]', // shorts in lockup
-        'a.ytd-thumbnail[href^="/shorts/' + strIdent + '"]', // shorts in list
-        'a.ytp-modern-videowall-still[href*="/watch?v=' + strIdent + '"]', // videowall
-        'a.ytp-videowall-still[href*="/watch?v=' + strIdent + '"]', // videowall
-        'a.ytp-ce-covering-overlay[href*="/watch?v=' + strIdent + '"]', // overlays
-        'a.media-item-thumbnail-container[href*="/watch?v=' + strIdent + '"]', // mobile
-        'a.YtmCompactMediaItemImage[href*="/watch?v=' + strIdent + '"]', // mobile
-    ]).join(', ')));
+    return Array.from(window.document.querySelectorAll(strIdent === '' ? strVideoselectorall : objVideoselectors.split('%IDENT%').join(strIdent)));
 };
 
 let funcIdent = function(objVideo) { // the 11 character id sits after /shorts/ for shorts and at the end of the watch url otherwise
@@ -55,6 +73,27 @@ let funcIdent = function(objVideo) { // the 11 character id sits after /shorts/ 
     }
 
     return objVideo.href.split('&')[0].slice(-11);
+};
+
+let funcElementident = function(objElement) {
+    let objCard = objElement.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-playlist-video-renderer, yt-lockup-view-model, .yt-lockup-view-model, .ytLockupViewModelHost');
+
+    if (objCard === null) {
+        return null;
+    }
+
+    let objLink = objCard.querySelector([
+        'a[href^="/watch?v="]',
+        'a[href*="/watch?v="]',
+        'a[href^="/shorts/"]',
+        'a[href*="/shorts/"]',
+    ].join(', '));
+
+    if ((objLink === null) || ((objLink.href || '') === '')) {
+        return null;
+    }
+
+    return funcIdent(objLink);
 };
 
 // turns a youtube history section header ("Today", "Yesterday", "Jun 21, 2025", "Saturday, June 21", ...) into a timestamp;
@@ -107,6 +146,44 @@ let funcHistorytimestamp = function(objVideo) {
     return funcHistorydate(objTitle.innerText || objTitle.textContent || '');
 };
 
+let funcProgresspercent = function(objVideo) {
+    let objCard = objVideo.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-playlist-video-renderer, yt-lockup-view-model, .yt-lockup-view-model, .ytLockupViewModelHost');
+    let objScope = objCard || objVideo.closest('ytd-thumbnail') || objVideo;
+    let objProgress = Array.from(objScope.querySelectorAll([
+        'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+        'ytd-thumbnail-overlay-resume-playback-renderer [style*="width"]',
+        'yt-thumbnail-overlay-progress-bar-view-model #progress',
+        'yt-thumbnail-overlay-progress-bar-view-model [style*="width"]',
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
+        '[class*="ThumbnailOverlayProgressBar"][style*="width"]',
+        '[class*="thumbnailOverlayProgressBar"][style*="width"]',
+    ].join(', ')));
+    let intPercent = null;
+
+    for (let objElement of objProgress) {
+        let strStyle = objElement.getAttribute('style') || '';
+        let objMatch = strStyle.match(/width\s*:\s*([0-9.]+)%/i);
+
+        if (objMatch === null) {
+            objMatch = strStyle.match(/--[^:]*percent[^:]*:\s*([0-9.]+)/i);
+        }
+
+        if (objMatch === null) {
+            continue;
+        }
+
+        let intValue = Math.round(parseFloat(objMatch[1]));
+
+        if ((isNaN(intValue) === true) || (intValue <= 0) || (intValue > 100)) {
+            continue;
+        }
+
+        intPercent = (intPercent === null) ? intValue : Math.min(intPercent, intValue);
+    }
+
+    return intPercent;
+};
+
 let refresh = async function() {
     let objVideos = videos('');
 
@@ -121,6 +198,12 @@ let refresh = async function() {
         let strTitle = '';
 
         let boolHistory = (objHistory !== null) && (boolYouhist === true) && (objHistory.contains(objVideo) === true);
+        let intPercent = ((boolHistory === true) && (objHistoryharvested.has(objVideo) !== true)) ? funcProgresspercent(objVideo) : null;
+        let boolHistorymark = (boolHistory === true) && (intPercent !== null);
+
+        if (boolHistorymark === true) {
+            objHistoryharvested.add(objVideo); // only once a bar was actually read - thumbnails whose overlay has not
+        } // rendered yet stay eligible, so the usual few-rescans-after-load retry behaviour is kept
 
         mark(objVideo, strIdent);
 
@@ -128,8 +211,9 @@ let refresh = async function() {
 
         hoverify(objVideo);
 
-        // watched videos never change so they stay cached, but watching videos need a re-lookup to pick up the latest progress
-        if ((objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched')) {
+        // watched videos normally stay cached, but a partial history resume bar is fresh evidence that can demote
+        // an unconfirmed watched mark back to watching.
+        if ((objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched') && ((boolHistorymark !== true) || (intPercent >= intThreshold))) {
             continue;
         }
 
@@ -150,24 +234,43 @@ let refresh = async function() {
             strTitle = objVideo.getAttribute('aria-label').trim(); // shorts thumbnails often only expose the title via aria-label
         }
 
-        await chrome.runtime.sendMessage({
-            // on the youtube history page we register the video (assumed - watched elsewhere) instead of just looking it up;
-            // a sub-threshold resume bar (red line) keeps it watching, otherwise it is assumed watched (shorts carry no bar)
-            'strMessage': boolHistory === true ? 'youtubeMark' : 'youtubeLookup',
+        if ((boolHistory === true) && (boolHistorymark !== true) && (objDebughistory[strIdent] !== true)) {
+            objDebughistory[strIdent] = true;
+
+            console.debug('[YWM mark] history progress missing', {
+                'strIdent': strIdent,
+                'strTitle': strTitle,
+                'strReason': 'history thumbnail had no positive resume bar, so it was not marked watched',
+                'intPercent': intPercent,
+                'strUrl': objVideo.href || '',
+            });
+        }
+
+        // on the youtube history page we register the video (assumed - watched elsewhere) instead of just looking it up;
+        // a positive resume bar (red line) decides watching vs watched. a plain lookup only needs the id and title, so
+        // the mark-only fields (state / percent / assumed / timestamp) are added only when we are actually marking.
+        let objMessage = {
+            'strMessage': boolHistorymark === true ? 'youtubeMark' : 'youtubeLookup',
             'strIdent': strIdent,
             'strTitle': strTitle,
-            'strState': 'watching',
-            'boolAssumed': true,
+        };
+
+        if (boolHistorymark === true) {
+            objMessage.strState = (intPercent >= intThreshold) ? 'watched' : 'watching';
+            objMessage.intPercent = intPercent;
+            objMessage.boolAssumed = true;
             // stamp it with the date youtube lists it under, so the plugin entry matches the watch history instead of "now"
-            'intTimestamp': boolHistory === true ? funcHistorytimestamp(objVideo) : null,
-        }, function(objResponse) {
+            objMessage.intTimestamp = funcHistorytimestamp(objVideo);
+        }
+
+        await chrome.runtime.sendMessage(objMessage, function(objResponse) {
             if ((objResponse === null) || (objResponse === undefined)) {
                 return;
             }
 
             objVideodata[objResponse.strIdent] = {
                 'intTimestamp': objResponse.intTimestamp,
-                'strState': objResponse.strState || 'watched',
+                'strState': objResponse.strState || 'watching',
                 'intPercent': objResponse.intPercent || 0,
                 'intCount': objResponse.intCount || 0,
                 'strDebugSource': objResponse.strDebugSource || '',
@@ -180,8 +283,8 @@ let refresh = async function() {
             }
         });
     }
-    
-    strLastchange = window.location.href + ':' + window.document.title + ':' + objVideos.length;
+
+    funcActivelabelsync();
 };
 
 let funcUnmark = function(objVideo) {
@@ -203,6 +306,22 @@ let funcUnmark = function(objVideo) {
         }
 
         objVideo.style.removeProperty('--youwatch-percent');
+    }
+};
+
+let forget = function(strIdent) {
+    if (objVideodata.hasOwnProperty(strIdent) === true) {
+        delete objVideodata[strIdent];
+    }
+
+    for (let strKey of Object.keys(objDebugmarked)) {
+        if (strKey.indexOf(strIdent + ':') === 0) {
+            delete objDebugmarked[strKey];
+        }
+    }
+
+    for (let objVideo of videos(strIdent)) {
+        funcUnmark(objVideo);
     }
 };
 
@@ -331,16 +450,64 @@ document.addEventListener('youtubeProgress', async function(objEvent) {
         // ...
     });
 
-    if (false) {
-        window.setTimeout(function() {
-            for (let objElement of document.querySelectorAll('span, a, yt-formatted-string')) {
-                if (objElement.textContent.includes(objEvent.detail['strTitle']) === true) {
-                    objElement.textContent = 'HOOK';
-                }
-            }
-        }, 3000);
-    }
 });
+
+// ##########################################################
+
+document.addEventListener('click', function(objEvent) {
+    if (window.location.pathname !== '/feed/history') {
+        return;
+    }
+
+    let objTarget = objEvent.target;
+    let strIdent = funcElementident(objTarget);
+
+    if (strIdent !== null) {
+        strHistorymenuident = strIdent;
+        intHistorymenutime = Date.now();
+    }
+
+    let objMenuitem = objTarget.closest('ytd-menu-service-item-renderer, ytd-menu-navigation-item-renderer, tp-yt-paper-item, yt-list-item-view-model, [role="menuitem"]');
+    let strText = ((objMenuitem || objTarget).innerText || (objMenuitem || objTarget).textContent || '').toLowerCase();
+
+    if (strText.indexOf('remove from watch history') === -1) {
+        return;
+    }
+
+    if ((strHistorymenuident === null) || ((Date.now() - intHistorymenutime) > 30000) || (objHistoryremoved[strHistorymenuident] === true)) {
+        return;
+    }
+
+    objHistoryremoved[strHistorymenuident] = true;
+
+    console.debug('[YWM forget] youtube history menu removal detected', {
+        'strIdent': strHistorymenuident,
+    });
+
+    chrome.runtime.sendMessage({
+        'strMessage': 'youtubeForget',
+        'strIdent': strHistorymenuident,
+        'strSource': 'youtube-history-native-remove',
+    }, function() {
+        void chrome.runtime.lastError;
+    });
+}, true);
+
+// ##########################################################
+
+document.addEventListener('play', function(objEvent) {
+    if ((objEvent.target === null) || (objEvent.target.tagName !== 'VIDEO')) {
+        return;
+    }
+
+    let strIdent = funcActiveident();
+
+    if ((strIdent !== null) && (strIdent.length === 11)) {
+        objActivelabelsuppressed[strIdent] = true;
+    }
+
+    funcActivelabelhide();
+}, true);
 
 // ##########################################################
 
@@ -348,12 +515,18 @@ chrome.runtime.onMessage.addListener(async function(objData, objSender, funcResp
     if (objData.strMessage === 'youtubeRefresh') {
         await refresh();
 
+    } else if (objData.strMessage === 'youtubeForget') {
+        forget(objData.strIdent);
+        objActivelabelmisses[objData.strIdent] = true;
+        funcActivelabelsync();
+
     } else if (objData.strMessage === 'youtubeMark') {
         let objPrev = objVideodata.hasOwnProperty(objData.strIdent) === true ? objVideodata[objData.strIdent] : {};
+        delete objActivelabelmisses[objData.strIdent];
 
         objVideodata[objData.strIdent] = {
             'intTimestamp': objData.intTimestamp || objPrev.intTimestamp || 0,
-            'strState': objData.strState || objPrev.strState || 'watched',
+            'strState': objData.strState || objPrev.strState || 'watching',
             'intPercent': (objData.intPercent !== undefined) && (objData.intPercent !== null) ? objData.intPercent : (objPrev.intPercent || 0),
             'intCount': (objData.intCount !== undefined) && (objData.intCount !== null) ? objData.intCount : (objPrev.intCount || 0),
         };
@@ -362,6 +535,8 @@ chrome.runtime.onMessage.addListener(async function(objData, objSender, funcResp
             mark(objVideo, objData.strIdent);
             hoverify(objVideo);
         }
+
+        funcActivelabelsync();
 
     }
 
@@ -389,10 +564,20 @@ let funcActivetitle = function() {
         strTitle = strTitle.slice(0, -10);
     }
 
+    strTitle = strTitle.replace(/^\(\d+\)\s*/, '');
+
     return strTitle.trim();
 };
 
 let funcVideoel = function() { // youtube can have several <video> elements, so pick the actual player
+    if (window.location.pathname.indexOf('/shorts/') === 0) { // neighbouring shorts are preloaded with their own <video>, so scope to the active reel
+        let objShorts = window.document.querySelector('ytd-reel-video-renderer[is-active] video, #shorts-player video');
+
+        if ((objShorts !== null) && (objShorts.duration) && (isNaN(objShorts.duration) === false) && (objShorts.duration > 0)) {
+            return objShorts;
+        }
+    }
+
     let objMain = window.document.querySelector('video.html5-main-video') || window.document.querySelector('.html5-video-player video');
 
     if ((objMain !== null) && (objMain.duration) && (isNaN(objMain.duration) === false) && (objMain.duration > 0)) {
@@ -412,11 +597,199 @@ let funcVideoel = function() { // youtube can have several <video> elements, so 
     return objBest;
 };
 
+let funcAnyvideoel = function() {
+    return window.document.querySelector('video.html5-main-video') || window.document.querySelector('.html5-video-player video') || window.document.querySelector('video');
+};
+
+let funcActivelabelhide = function() {
+    if ((objActivelabel !== null) && (objActivelabel.parentNode !== null)) {
+        objActivelabel.parentNode.removeChild(objActivelabel);
+    }
+};
+
+let funcActivelabelnode = function() {
+    let objPlayer = window.document.getElementById('movie_player');
+
+    if (objPlayer === null) {
+        return null;
+    }
+
+    if (objActivelabel === null) {
+        objActivelabel = window.document.createElement('div');
+        objActivelabel.className = 'youwatch-active-label';
+        objActivelabel.style.backgroundColor = '#0f0f0f';
+        objActivelabel.style.borderRadius = '8px';
+        objActivelabel.style.boxShadow = '0px 1px 4px rgba(0,0,0,0.45)';
+        objActivelabel.style.color = '#ffffff';
+        objActivelabel.style.fontFamily = 'Roboto, Arial, sans-serif';
+        objActivelabel.style.fontSize = '12px';
+        objActivelabel.style.fontWeight = '500';
+        objActivelabel.style.left = '12px';
+        objActivelabel.style.lineHeight = 'normal';
+        objActivelabel.style.opacity = '0.95';
+        objActivelabel.style.padding = '5px 8px';
+        objActivelabel.style.pointerEvents = 'none';
+        objActivelabel.style.position = 'absolute';
+        objActivelabel.style.top = '12px';
+        objActivelabel.style.zIndex = '10000';
+    }
+
+    if (objActivelabel.parentNode !== objPlayer) {
+        objPlayer.appendChild(objActivelabel);
+    }
+
+    return objActivelabel;
+};
+
+let funcActivelabelstate = function(objData) {
+    if ((objData === null) || (objData === undefined)) {
+        return '';
+    }
+
+    if (objData.strState === 'watched') {
+        return 'WATCHED';
+    }
+
+    if ((objData.intPercent || 0) > 0) {
+        return 'WATCHING ' + Math.max(0, Math.min(100, objData.intPercent || 0)) + '%';
+    }
+
+    return '';
+};
+
+let funcActiveplaying = function() {
+    let objVideoel = funcAnyvideoel();
+
+    return (objVideoel !== null) && (objVideoel.paused !== true) && (objVideoel.ended !== true);
+};
+
+let funcActivelabelplaylistener = function() {
+    let objVideoel = funcAnyvideoel();
+
+    if ((objVideoel === null) || (objActiveplaylisteners.has(objVideoel) === true)) {
+        return;
+    }
+
+    objActiveplaylisteners.add(objVideoel);
+
+    objVideoel.addEventListener('play', function() {
+        let strIdent = funcActiveident();
+
+        if ((strIdent !== null) && (strIdent.length === 11)) {
+            objActivelabelsuppressed[strIdent] = true;
+        }
+
+        funcActivelabelhide();
+    });
+};
+
+let funcActivelabellookup = function(strIdent) {
+    if (objActivelookups[strIdent] === true) {
+        return;
+    }
+
+    objActivelookups[strIdent] = true;
+
+    chrome.runtime.sendMessage({
+        'strMessage': 'youtubeLookup',
+        'strIdent': strIdent,
+        'strTitle': funcActivetitle(),
+    }, function(objResponse) {
+        delete objActivelookups[strIdent];
+
+        if ((objResponse !== null) && (objResponse !== undefined)) {
+            delete objActivelabelmisses[objResponse.strIdent];
+
+            objVideodata[objResponse.strIdent] = {
+                'intTimestamp': objResponse.intTimestamp,
+                'strState': objResponse.strState || 'watching',
+                'intPercent': objResponse.intPercent || 0,
+                'intCount': objResponse.intCount || 0,
+                'strDebugSource': objResponse.strDebugSource || '',
+                'strDebugReason': objResponse.strDebugReason || '',
+                'intDebugTimestamp': objResponse.intDebugTimestamp || 0,
+            };
+        } else {
+            objActivelabelmisses[strIdent] = true;
+        }
+
+        if (funcActiveident() === strIdent) {
+            funcActivelabelsync();
+        }
+    });
+};
+
+let funcActivelabelsync = function() {
+    let strIdent = funcActiveident();
+
+    funcActivelabelplaylistener();
+
+    if ((strIdent !== null) && (strIdent.length === 11) && (funcActiveplaying() === true)) {
+        objActivelabelsuppressed[strIdent] = true;
+    }
+
+    if ((strIdent === null) || (strIdent.length !== 11) || (objActivelabelsuppressed[strIdent] === true)) {
+        funcActivelabelhide();
+        return;
+    }
+
+    if (objVideodata.hasOwnProperty(strIdent) !== true) {
+        funcActivelabelhide();
+        if (objActivelabelmisses[strIdent] !== true) {
+            funcActivelabellookup(strIdent);
+        }
+        return;
+    }
+
+    let strLabel = funcActivelabelstate(objVideodata[strIdent]);
+
+    if (strLabel === '') {
+        funcActivelabelhide();
+        return;
+    }
+
+    let objLabel = funcActivelabelnode();
+
+    if (objLabel === null) {
+        return;
+    }
+
+    objLabel.textContent = strLabel;
+    objLabel.style.backgroundColor = objVideodata[strIdent].strState === 'watched' ? '#0f0f0f' : '#ff8f00';
+    objLabel.style.color = objVideodata[strIdent].strState === 'watched' ? '#ffffff' : '#0f0f0f';
+};
+
+// the url (funcActiveident) updates via pushState before the player finishes swapping its stream, so right after a
+// navigation or an autoplay-to-next-video the <video> element can still report the previous video's currentTime/duration
+// for a brief window - asking the player api which video it actually has loaded catches that race before it is
+// mistaken for the new video crossing the watched threshold
+let funcPlayerident = function() {
+    let objPlayer = window.document.getElementById('movie_player');
+
+    if ((objPlayer === null) || (typeof objPlayer.getVideoData !== 'function')) {
+        return null;
+    }
+
+    try {
+        let objData = objPlayer.getVideoData();
+        return ((objData !== null) && (objData !== undefined) && (objData.video_id)) ? objData.video_id : null;
+
+    } catch (objError) {
+        return null;
+    }
+};
+
 let funcProgress = function() { // promote the active video to watched once the player crosses the threshold
     let strIdent = funcActiveident();
 
     if ((strIdent === null) || (strIdent.length !== 11)) {
         return;
+    }
+
+    let strPlayerident = funcPlayerident();
+
+    if ((strPlayerident !== null) && (strPlayerident !== strIdent)) {
+        return; // the player has not finished loading this video yet - its time/duration still belong to the previous one
     }
 
     let objVideoel = funcVideoel();
@@ -425,23 +798,37 @@ let funcProgress = function() { // promote the active video to watched once the 
         return;
     }
 
-    let intPercent = Math.round((objVideoel.currentTime / objVideoel.duration) * 100);
+    let boolShorts = window.location.pathname.indexOf('/shorts/') === 0;
 
-    if ((intPercent >= intThreshold) && (objCompleted[strIdent] !== true)) {
+    let intPercent = Math.round((objVideoel.currentTime / objVideoel.duration) * 100);
+    let intNow = new Date().getTime();
+    let boolPlaying = (objVideoel.paused !== true) && (objVideoel.ended !== true) && (objVideoel.readyState >= 2);
+
+    // a single (nearly) full play of a short is enough to count it as watched - shorts loop instead of ending, so both
+    // a reading near the end and a wrap back to the start (the loop restarting) confirm a completed watch
+    let intComplete = boolShorts === true ? 90 : intThreshold;
+    let boolLooped = (boolShorts === true) && (boolPlaying === true) && (objReported[strIdent] !== undefined) && (objReported[strIdent] >= 50) && (intPercent < objReported[strIdent] - 40);
+
+    if (((intPercent >= intComplete) || (boolLooped === true)) && (objCompleted[strIdent] !== true)) {
         objCompleted[strIdent] = true;
 
         chrome.runtime.sendMessage({
             'strMessage': 'youtubeComplete',
             'strIdent': strIdent,
             'strTitle': funcActivetitle(),
+            'boolShorts': boolShorts,
         }, function(objResponse) {
             // ...
         });
 
-    } else if ((intPercent < intThreshold) && (objCompleted[strIdent] !== true) && (objReported[strIdent] !== intPercent)) {
+    } else if ((boolShorts === true) && (objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched')) {
+        // a watched short stays watched - loop restarts and re-opens must not report sub-threshold progress for it
+
+    } else if ((intPercent < intComplete) && (objCompleted[strIdent] !== true) && (boolPlaying === true) && ((objReported[strIdent] !== intPercent) || ((intNow - (objReporttime[strIdent] || 0)) >= 60000))) {
         let boolResume = (objReported[strIdent] === undefined); // the first reading after opening reflects the resume position
 
-        objReported[strIdent] = intPercent; // report live progress, but only on a whole-percent change to limit writes
+        objReported[strIdent] = intPercent; // report live progress on whole-percent changes, plus a bounded periodic refresh
+        objReporttime[strIdent] = intNow; // long videos can sit on the same whole percent for a while, so still refresh once a minute
 
         chrome.runtime.sendMessage({
             'strMessage': 'youtubeWatching',
@@ -449,6 +836,7 @@ let funcProgress = function() { // promote the active video to watched once the 
             'strTitle': funcActivetitle(),
             'intPercent': intPercent,
             'boolResume': boolResume,
+            'boolShorts': boolShorts,
         }, function(objResponse) {
             // ...
         });
@@ -456,7 +844,13 @@ let funcProgress = function() { // promote the active video to watched once the 
     }
 };
 
-window.setInterval(funcProgress, 1000);
+window.setInterval(funcProgress, 15000);
+
+window.setInterval(function() { // most shorts are over well before the 15s cadence gets a second reading, so poll every second while one is open
+    if (window.location.pathname.indexOf('/shorts/') === 0) {
+        funcProgress();
+    }
+}, 1000);
 
 // ##########################################################
 
@@ -471,10 +865,14 @@ document.addEventListener('visibilitychange', async function() {
 let eventhandler = function() {
     objCompleted = {}; // a navigation starts a fresh watch, so a re-watch of the same video counts again (and shorts loops do not)
     objReported = {};
+    objReporttime = {};
+    objActivelabelsuppressed = {};
+    funcActivelabelhide();
 
-    for (let delay = 0; delay < 3000 + 1; delay += 300) {
-        window.setTimeout(refresh, delay); // refreshing right away might have been too early so instead we do it brute force
-    }
+    // the mutation observer marks the dom dirty as youtube streams the thumbnails in, and the polling loop below then
+    // rescans - so a single refresh here (instead of the previous brute-force burst of ~11 timeouts) catches the navigation
+    boolDirty = true;
+    refresh();
 };
 
 document.addEventListener('yt-service-request-completed', eventhandler); // https://github.com/sota2501/youtube-chat-ex/blob/master/docs/event.md
@@ -485,14 +883,28 @@ document.addEventListener('yt-visibility-refresh', eventhandler); // https://git
 
 // ##########################################################
 
+// a dom mutation (new thumbnails scrolling in, an spa navigation swapping the page) is the only thing that makes a
+// rescan worthwhile - flagging it here lets the polling loop skip the expensive querySelectorAll on idle ticks
+let objMutationobserver = new MutationObserver(function() {
+    boolDirty = true;
+});
+
+objMutationobserver.observe(window.document.documentElement, { 'childList': true, 'subtree': true });
+
 window.setInterval(async function() {
     if (document.hidden === true) {
         return;
+    }
 
-    } else if (strLastchange === window.location.href + ':' + window.document.title + ':' + videos('').length) {
-        return;
+    let strNav = window.location.href + ':' + window.document.title;
+
+    if ((boolDirty === false) && (strNav === strLastnav)) {
+        return; // nothing changed in the dom and we are still on the same page, so there is nothing new to mark
 
     }
+
+    boolDirty = false;
+    strLastnav = strNav;
 
     await refresh();
 }, 300);

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Watch List</title>
+        <link rel="stylesheet" type="text/css" href="sidebar.css" />
+        <script type="text/javascript" src="sidebar.js" defer></script>
+    </head>
+    <body>
+        <main id="idWatchlist">
+            <div class="toolbar">
+                <button class="add-current" id="idAddCurrent" type="button" title="Add the active YouTube video to the watch list">+ Add current video</button>
+                <div class="status" id="idStatus"></div>
+            </div>
+
+            <section class="section" id="idActiveSection">
+                <div class="section-title">Watch list</div>
+                <div class="list" id="idActiveList"></div>
+            </section>
+
+            <section class="section" id="idWatchedSection">
+                <div class="section-title">Watched</div>
+                <div class="list" id="idWatchedList"></div>
+            </section>
+
+            <div class="empty" id="idEmpty">No saved videos yet.</div>
+        </main>
+    </body>
+</html>

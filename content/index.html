@@ -7,7 +7,7 @@
         
         <title>Youtube Watchmarker</title>
 
-        <link rel="icon" type="image/png" href="icon.png" />
+        <link rel="icon" type="image/svg+xml" href="icon-bw.svg" />
 
         <script type="text/javascript" src="jquery.js"></script>
 
@@ -24,29 +24,44 @@
     <body style="color-scheme:light; cursor:default; line-height:1.1; padding:20px 20px 0px 20px;">
         <div class="card" style="margin:0px auto 20px auto; max-width:700px;">
             <div class="card-header">
-                Database
+                Backup
             </div>
 
             <div class="card-body">
-                <p style="text-align:justify;">The database is only stored within the browser, which is why uninstalling the browser or even just this addon would lead to the loss of your timeline. You are therefore highly encouraged to regularly export the database in order to have a backup.</p>
+                <p style="text-align:justify;">Watchmarker and Watchlist data are only stored within the browser, which is why uninstalling the browser or even just this addon would lead to data loss. Exporting creates a combined backup of both databases.</p>
 
                 <button class="btn btn-primary" id="idDatabase_Export">Export</button>
 
                 <button class="btn btn-primary" id="idDatabase_Import" style="position:relative;">
-                    Import<input type="file" accept=".database" style="cursor:pointer; bottom:0px; height:100%; left:0px; opacity:0.0; position:absolute; right:0px; top:0px; width:100%; z-index:1;" />
+                    Import<input type="file" accept=".watchmarker,.database,.watchlist" style="cursor:pointer; bottom:0px; height:100%; left:0px; opacity:0.0; position:absolute; right:0px; top:0px; width:100%; z-index:1;" />
                 </button>
 
-                <button class="btn btn-primary" id="idDatabase_Reset">Reset</button>
+                <button class="btn btn-primary" id="idDatabase_Reset">Reset Watchmarker</button>
 
                 <div class="input-group" style="display:none; font-size:0px; margin:0px 5px 0px 0px; vertical-align:top;">
-                    <div style="display:inline-block; vertical-align:top;"><button class="btn btn-primary">Reset</button></div>
+                    <div style="display:inline-block; vertical-align:top;"><button class="btn btn-primary">Reset Watchmarker</button></div>
                     <div class="form-control" style="display:inline-block; width:auto;">Are you sure?</div>
                     <div style="display:inline-block; vertical-align:top;"><button class="btn btn-danger" id="idDatabase_Resyes">Yes</button></div>
                 </div>
 
-                <div class="input-group" style="display:inline; font-size:0px; margin:0px 5px 0px 0px; vertical-align:top;">
-                    <div style="display:inline-block; vertical-align:top;"><span class="input-group-text">Size:</span></div>
-                    <div class="form-control" id="idDatabase_Size" style="display:inline-block; width:auto;"></div>
+                <button class="btn btn-primary" id="idWatchlist_Reset">Reset Watchlist</button>
+
+                <div class="input-group" style="display:none; font-size:0px; margin:0px 5px 0px 0px; vertical-align:top;">
+                    <div style="display:inline-block; vertical-align:top;"><button class="btn btn-primary">Reset Watchlist</button></div>
+                    <div class="form-control" style="display:inline-block; width:auto;">Are you sure?</div>
+                    <div style="display:inline-block; vertical-align:top;"><button class="btn btn-danger" id="idWatchlist_Resyes">Yes</button></div>
+                </div>
+
+                <div style="margin:12px 0px 0px 0px;">
+                    <div class="input-group" style="display:inline; font-size:0px; margin:0px 5px 0px 0px; vertical-align:top;">
+                        <div style="display:inline-block; vertical-align:top;"><span class="input-group-text">Watchmarker:</span></div>
+                        <div class="form-control" id="idDatabase_Size" style="display:inline-block; width:auto;"></div>
+                    </div>
+
+                    <div class="input-group" style="display:inline; font-size:0px; margin:0px 5px 0px 0px; vertical-align:top;">
+                        <div style="display:inline-block; vertical-align:top;"><span class="input-group-text">Watchlist:</span></div>
+                        <div class="form-control" id="idWatchlist_Size" style="display:inline-block; width:auto;"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -92,7 +107,7 @@
 
             <div class="card-body">
                 <div class="input-group" style="margin:0px 0px 17px 0px;">
-                    <div class="form-control">Mark a video as being watched once it has been opened in the browser. It only becomes watched once the player reaches 95%.</div>
+                    <div class="form-control">Mark a video as being watched once it has been opened in the browser. It only becomes watched once the player reaches 99%.</div>
                     <button class="btn btn-primary" id="idCondition_Brownav">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
@@ -100,7 +115,7 @@
                 </div>
 
                 <div class="input-group" style="margin:0px 0px 17px 0px;">
-                    <div class="form-control">Mark a video as being watched once it appears in the browser's history.</div>
+                    <div class="form-control">Sync watched videos from Firefox history. Paused because page visits are not reliable watch signals.</div>
                     <button class="btn btn-primary" id="idCondition_Browhist">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
@@ -116,7 +131,7 @@
                 </div>
 
                 <div class="input-group" style="margin:0px 0px 17px 0px;">
-                    <div class="form-control">Mark a video according to the watch progress shown on its Youtube thumbnail (watched at 95% or more).</div>
+                    <div class="form-control">Mark a video according to the watch progress shown on its Youtube thumbnail (watched at 99% or more).</div>
                     <button class="btn btn-primary" id="idCondition_Youbadge">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
@@ -185,9 +200,17 @@
                     </button>
                 </div>
 
-                <div class="input-group" style="margin:0px 0px 0px 0px;">
+                <div class="input-group" style="margin:0px 0px 17px 0px;">
                     <div class="form-control">Show the date of when the video has been watched in the textual badge.</div>
                     <button class="btn btn-primary" id="idVisualization_Showdate">
+                        <i class="fa-regular fa-square"></i>
+                        <i class="fa-regular fa-check-square"></i>
+                    </button>
+                </div>
+
+                <div class="input-group" style="margin:0px 0px 0px 0px;">
+                    <div class="form-control">Show how many times a watched video has been completed, in the opposite corner.</div>
+                    <button class="btn btn-primary" id="idVisualization_Showcount">
                         <i class="fa-regular fa-square"></i>
                         <i class="fa-regular fa-check-square"></i>
                     </button>

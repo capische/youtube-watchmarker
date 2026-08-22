@@ -1,7 +1,7 @@
 'use strict';
 
 if (typeof importScripts === 'function') {
-    importScripts('idb.js'); // chrome service worker - firefox loads idb.js through background.scripts instead
+    importScripts('idb.js', 'parse.js'); // chrome service worker - firefox loads these through background.scripts instead
 }
 
 let funcStorageget = async function(strKey) {
@@ -18,18 +18,142 @@ let funcStorageset = async function(strKey, objValue) {
      await chrome.storage.local.set({ [strKey]: String(objValue) });
 };
 
+// extracts the 11 character video id from a youtube url. parsing the query string (rather than assuming v is the last
+// parameter) means urls like /watch?app=desktop&v=xxxxxxxxxxx no longer yield a garbage 11 char slice such as "app=desktop"
+let funcIdentfromurl = function(strUrl) {
+    try {
+        let objUrl = new URL(strUrl);
+
+        if (objUrl.pathname.indexOf('/shorts/') === 0) {
+            let strIdent = objUrl.pathname.split('/shorts/')[1].slice(0, 11);
+            return (strIdent.length === 11) ? strIdent : null;
+        }
+
+        let strIdent = objUrl.searchParams.get('v') || '';
+        return (strIdent.length === 11) ? strIdent : null;
+    } catch (objError) {
+        return null;
+    }
+};
+
+let funcNormalizedyoutubetitle = function(strTitle) {
+    strTitle = strTitle || '';
+
+    if (strTitle.slice(-10) === ' - YouTube') {
+        strTitle = strTitle.slice(0, -10);
+    }
+
+    // youtube prefixes the tab title with an unread-notifications count (eg "(6) Video Title"),
+    // which isn't part of the actual video title
+    return strTitle.replace(/^\(\d+\)\s*/, '').trim();
+};
+
+let funcBroadcast = function(objResult) { // push the resulting state to every open youtube tab so the marks update live
+    if ((objResult === null) || (objResult === undefined)) {
+        return;
+    }
+
+    chrome.tabs.query({
+        'url': '*://*.youtube.com/*'
+    }, function(objTabs) {
+        for (let objTab of objTabs) {
+            chrome.tabs.sendMessage(objTab.id, {
+                'strMessage': 'youtubeMark',
+                'strIdent': objResult.strIdent,
+                'intTimestamp': objResult.intTimestamp,
+                'strTitle': objResult.strTitle,
+                'strState': objResult.strState,
+                'intPercent': objResult.intPercent,
+                'intCount': objResult.intCount,
+            });
+        }
+    });
+};
+
+let funcBroadcastforget = function(objResult) { // remove local marks from every open youtube tab after a local-only delete
+    if ((objResult === null) || (objResult === undefined)) {
+        return;
+    }
+
+    chrome.tabs.query({
+        'url': '*://*.youtube.com/*'
+    }, function(objTabs) {
+        for (let objTab of objTabs) {
+            chrome.tabs.sendMessage(objTab.id, {
+                'strMessage': 'youtubeForget',
+                'strIdent': objResult.strIdent,
+            });
+        }
+    });
+};
+
+let funcNotifywatchlist = async function(objResult) { // tell the sidebar to refresh when watch progress changes for a video that's on the watchlist
+    if ((objResult === null) || (objResult === undefined)) {
+        return;
+    }
+
+    if (typeof globalThis.funcWatchlistHasIdent !== 'function') {
+        return;
+    }
+
+    if (await globalThis.funcWatchlistHasIdent(objResult.strIdent) !== true) {
+        return; // avoid spamming the sidebar with a refresh for every video played, watchlisted or not
+    }
+
+    chrome.runtime.sendMessage({ 'strMessage': 'watchlist:refresh' }, function() {
+        void chrome.runtime.lastError; // the sidebar may not be open
+    });
+};
+
+let funcMarktabopen = async function(objTab, strTitle) {
+    if ((objTab === undefined) || (objTab === null) || ((objTab.url || '').indexOf('.youtube.com') === -1)) {
+        return;
+    }
+
+    if (await funcStorageget('extensions.Youwatch.Condition.boolBrownav') !== String(true)) {
+        return;
+    }
+
+    if (((objTab.url || '').indexOf('.youtube.com/watch?v=') === -1) && ((objTab.url || '').indexOf('.youtube.com/shorts/') === -1)) {
+        return;
+    }
+
+    let strIdent = funcIdentfromurl(objTab.url || '');
+    strTitle = funcNormalizedyoutubetitle(strTitle || objTab.title || '');
+
+    // background-tab opens do not reliably surface a title delta in tabs.onUpdated, so fall back to the current tab
+    // title on the completion event instead of silently skipping the "opened here" watching mark.
+    if ((strIdent === null) || (strTitle === '')) {
+        return;
+    }
+
+    let objResult = await Youtube.mark({
+        'strIdent': strIdent,
+        'strTitle': strTitle,
+        'strState': 'watching',
+        'boolOpened': true,
+        'boolEnsure': true,
+        'strSource': 'tab-open',
+    });
+
+    funcBroadcast(objResult);
+    funcNotifywatchlist(objResult);
+};
+
 let objThemes = { // the visual look of the marks - each theme supplies the stylesheet strings used when rendering them
     'orange': {
         'strFadeout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { opacity:0.3; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { opacity:1.0; }',
         'strGrayout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { filter:grayscale(1.0); transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { filter:none; }',
         'strShowbadge': '.youwatch-watched::after { background-color:#000000; border-radius:2px; color:#FFFFFF; content:"WATCHED"; font-size:11px; left:4px; opacity:0.8; padding:3px 4px 3px 4px; position:absolute; top:4px; }',
         'strShowwatching': '.youwatch-watching { position:relative; border-radius:12px; overflow:hidden; } .youwatch-watching::after { background-color:#ff8f00; border-radius:8px; box-shadow:0px 1px 4px rgba(0,0,0,0.45); color:#0f0f0f; content:"▶ WATCHING"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; } .youwatch-watching[watchpercent]::after { content:"▶ WATCHING " attr(watchpercent) "%"; } .youwatch-watching::before { background-color:#ff8f00; top:0px; content:""; height:3px; left:0px; position:absolute; width:var(--youwatch-percent, 0%); z-index:3; }',
+        'strShowcount': '.youwatch-watched[watchcount]:not([watchcount="0"]):not([watchcount="1"])::before { align-items:center; background-color:rgba(0,0,0,0.6); border-radius:50%; color:#FFFFFF; content:attr(watchcount); display:flex; font-size:11px; height:18px; justify-content:center; line-height:1; position:absolute; right:19px; top:4px; width:18px; }',
     },
     'bw': { // black and white - grayscale on watched, watching keeps its colour with a light fade, both wear a black pill badge
         'strFadeout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { opacity:0.3; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watching img.ytCoreImageHost, .youwatch-watching .ytp-videowall-still-image { opacity:0.7; transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watching:hover img.ytCoreImageHost, .youwatch-watching:hover .ytp-videowall-still-image, .youwatch-watching:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video, .youwatch-watching.youwatch-hover img.ytCoreImageHost, .youwatch-watching.youwatch-hover .ytp-videowall-still-image, .youwatch-watching.youwatch-hover video { opacity:1.0; }',
         'strGrayout': '.youwatch-watched img.ytCoreImageHost, .youwatch-watched .ytp-videowall-still-image { filter:grayscale(1.0); transition:filter 0.25s ease-in-out, opacity 0.25s ease-in-out; } .youwatch-watched:hover img.ytCoreImageHost, .youwatch-watched:hover .ytp-videowall-still-image, .youwatch-watched:hover video, .youwatch-watched.youwatch-hover img.ytCoreImageHost, .youwatch-watched.youwatch-hover .ytp-videowall-still-image, .youwatch-watched.youwatch-hover video { filter:none; }',
         'strShowbadge': '.youwatch-watched::after { background-color:#0f0f0f; border-radius:8px; color:#FFFFFF; content:"WATCHED"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; }',
         'strShowwatching': '.youwatch-watching { position:relative; border-radius:12px; overflow:hidden; } .youwatch-watching::after { background-color:#0f0f0f; border-radius:8px; color:#FFFFFF; content:"WATCHING"; font-size:12px; font-weight:500; left:8px; line-height:normal; opacity:0.95; padding:4px 7px 4px 7px; position:absolute; top:8px; z-index:3; } .youwatch-watching[watchpercent]::after { content:"WATCHING " attr(watchpercent) "%"; }',
+        'strShowcount': '.youwatch-watched[watchcount]:not([watchcount="0"]):not([watchcount="1"])::before, .youwatch-watching[watchcount]:not([watchcount="0"]):not([watchcount="1"])::before { align-items:center; background-color:rgba(15,15,15,0.75); border-radius:50%; color:#FFFFFF; content:attr(watchcount); display:flex; font-size:12px; font-weight:500; height:22px; justify-content:center; line-height:1; position:absolute; right:23px; top:8px; width:22px; z-index:3; }',
     },
 };
 
@@ -40,7 +164,7 @@ let funcApplytheme = async function(strTheme) { // refresh the stylesheet string
 
     await funcStorageset('extensions.Youwatch.Visualization.strTheme', strTheme);
 
-    for (let strKey of ['strFadeout', 'strGrayout', 'strShowbadge', 'strShowwatching']) {
+    for (let strKey of ['strFadeout', 'strGrayout', 'strShowbadge', 'strShowwatching', 'strShowcount']) {
         let strCurrent = await funcStorageget('extensions.Youwatch.Stylesheet.' + strKey);
 
         if ((strCurrent === null) || (strCurrent.indexOf('do not modify') === -1)) {
@@ -90,7 +214,7 @@ let funcRecord = async function(objStore, objVideo) {
     let objGet = await objStore.index('strIdent').get(strIdent);
     let boolNew = (objGet === undefined) || (objGet === null);
 
-    let strStateold = boolNew ? 'watching' : (objGet.strState || 'watched'); // missing state on legacy records means watched
+    let strStateold = boolNew ? 'watching' : funcStoredstate(objGet, 'record-existing'); // a stored record missing its state is treated as watching (and warned about) rather than silently assumed watched
     let boolOpenedold = (boolNew === false) && (objGet.boolOpened === true);
     let boolConfirmedold = (boolNew === false) && (objGet.boolConfirmed === true);
 
@@ -100,32 +224,44 @@ let funcRecord = async function(objStore, objVideo) {
     let strState = null;
     let strReason = '';
 
-    if (boolConfirmed === true) {
+    // a fresh sub-threshold reading - whether real playback resuming from early, or the history page's own resume bar -
+    // overturns even a previously confirmed/sticky watched mark: real evidence of an incomplete watch beats an old confirmation
+    // a short is exempt: one completed play is final, and its natural loop restarts (or a re-open) would otherwise read as a resume
+    let boolLiveresume = (objVideo.boolShorts !== true) && (strStateold === 'watched') && (objVideo.boolCompleted !== true) && (objVideo.boolConfirmed !== true) && (objVideo.strState !== 'watched') && (
+        (((objVideo.boolResume === true) || (objVideo.boolOpened === true)) && ((objVideo.intPercent || 0) >= 5))
+        || ((objVideo.boolAssumed === true) && (objVideo.intPercent !== undefined) && (objVideo.intPercent !== null))
+    );
+
+    if (boolLiveresume === true) {
+        strState = 'watching';
+        boolConfirmed = false; // the fresh evidence overturns the previous confirmation, sticky or not
+        strReason = 'a fresh sub-threshold reading showed the previous watched mark, even a confirmed one, was not accurate';
+
+    } else if (boolConfirmed === true) {
         strState = 'watched'; // a confirmed local completion is final
         strReason = (objVideo.boolCompleted === true) ? 'local player crossed the watched threshold' : 'manual or previous confirmed watched mark is sticky';
 
     } else if (objVideo.boolAssumed === true) {
-        if (boolOpened === true) {
-            strState = strStateold; // opened here, so the local state wins over the history assumption
-            strReason = 'assumed history signal ignored because local opened state wins';
-
-        } else if (objVideo.strState === 'watched') {
-            strState = 'watched'; // the resume bar reached the threshold, or there is no bar at all (a short / a fully watched video / browser history)
-            strReason = 'assumed source reported watched or had no sub-threshold resume bar';
+        if (objVideo.strState === 'watched') {
+            strState = 'watched'; // finished elsewhere with a full (or 100%) resume bar - accept it even if we opened it here before
+            strReason = 'assumed source reported watched';
 
         } else if ((objVideo.intPercent !== undefined) && (objVideo.intPercent !== null)) {
             strState = 'watching'; // a fresh resume-bar reading below the threshold - only partially watched elsewhere
             strReason = 'assumed source had a sub-threshold resume bar';
 
+        } else if (boolOpened === true) {
+            strState = strStateold; // opened and tracked here, local state wins when there is no fresh progress reading
+            strReason = 'assumed history signal without progress ignored because local opened state wins';
+
         } else {
-            strState = boolNew ? 'watched' : strStateold; // no reading at all - a new history entry is assumed watched (shorts carry no bar), an existing one keeps its state
-            strReason = boolNew ? 'new assumed history entry had no progress reading, so it was treated as watched' : 'assumed history entry had no progress reading, so existing state was kept';
+            // no progress reading at all (eg the history parse could not find a resume bar). instead of silently
+            // assuming watched, surface a new entry as watching so the anomaly is visible and reversible; an existing
+            // entry keeps whatever state it already had. the caller (Youtube.synchronize) warns for this case.
+            strState = boolNew ? 'watching' : strStateold;
+            strReason = boolNew ? 'new assumed entry had no progress reading, so it was treated as watching' : 'assumed entry had no progress reading, so existing state was kept';
 
         }
-
-    } else if ((objVideo.boolResume === true) && (strStateold === 'watched') && ((objVideo.intPercent || 0) >= 5)) {
-        strState = 'watching'; // opening it resumed from the middle, so it was not actually finished elsewhere
-        strReason = 'resume progress from the middle showed the previous watched mark was only an assumption';
 
     } else {
         strState = ((strStateold === 'watched') || (objVideo.strState === 'watched')) ? 'watched' : 'watching';
@@ -140,7 +276,7 @@ let funcRecord = async function(objStore, objVideo) {
             intInc = 1; // a fresh live completion, including re-watches of an already watched video
 
         } else if ((strStateold !== 'watched') && (strState === 'watched')) {
-            intInc = 1; // first promotion to watched (e.g. history or a feed thumbnail reporting >= 95%)
+            intInc = 1; // first promotion to watched (e.g. history or a feed thumbnail reporting >= 99%)
 
         }
     }
@@ -323,239 +459,8 @@ let funcYoufetch = async function(strLink, objPayload, objContext, strClicktrack
     });
 };
 
-let funcHackyparse = function(strJson) {
-    let intLength = 1;
-
-    for (let intCount = 0; intLength < strJson.length; intLength += 1) {
-        if (strJson[intLength - 1] === '{') {
-            intCount += 1;
-
-        } else if (strJson[intLength - 1] === '}') {
-            intCount -= 1;
-
-        }
-
-        if (intCount === 0) {
-            break;
-        }
-    }
-
-    try {
-        return JSON.parse(strJson.substr(0, intLength));
-    } catch (objError) {
-        // ...
-    }
-
-    return null;
-};
-
-let funcParsevideos = function(strText, boolProgress) {
-    let objVideos = [];
-
-    if (strText.indexOf('\\x22responseContext\\x22') !== -1) {
-        strText = strText.replace(new RegExp('\\\\x([0-9a-f][0-9a-f])', 'g'), function(objMatch) {
-            return String.fromCharCode(parseInt(objMatch.substr(2), 16));
-        });
-    }
-
-    for (let strVideo of strText.split('{"lockupViewModel":').slice(1)) {
-        let objVideo = funcHackyparse('{"lockupViewModel":' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"thumbnailOverlayProgressBarViewModel"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['lockupViewModel']['contentId'];
-        let strTitle = null;
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['lockupViewModel']['metadata']['lockupMetadataViewModel']['title']['content'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['lockupViewModel']['rendererContext']['accessibilityContext']['label'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strIdent.length !== 11) {
-            continue;
-
-        } else if (strTitle === null) {
-            continue;
-
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"videoWithContextRenderer":').slice(1)) {
-        let objVideo = funcHackyparse('{"videoWithContextRenderer":' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"startTimeSeconds"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['videoWithContextRenderer']['videoId'];
-        let strTitle = null;
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['videoWithContextRenderer']['headline']['runs'][0]['text'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['videoWithContextRenderer']['headline']['accessibility']['accessibilityData']['label'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strIdent.length !== 11) {
-            continue;
-
-        } else if (strTitle === null) {
-            continue;
-
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"videoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"videoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['videoRenderer']['videoId'];
-        let strTitle = objVideo['videoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"compactVideoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"compactVideoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['compactVideoRenderer']['videoId'];
-        let strTitle = objVideo['compactVideoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"playlistVideoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"playlistVideoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['playlistVideoRenderer']['videoId'];
-        let strTitle = objVideo['playlistVideoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    return objVideos;
-};
-
-let funcPercent = function(objVideo) { // the resume progress bar (red line) reports how much of the video has been watched
-    let strJson = JSON.stringify(objVideo);
-    let objMatch = null;
-
-    if ((objMatch = strJson.match(/"percentDurationWatched":\s*(\d+)/)) !== null) {
-        return parseInt(objMatch[1]); // videoRenderer / compactVideoRenderer / playlistVideoRenderer carry it directly
-    }
-
-    if ((objMatch = strJson.match(/"thumbnailOverlayProgressBarViewModel":\s*\{([^{}]*)\}/)) !== null) {
-        let intPercent = null; // the newer lockupViewModel exposes the watched extent through the resume bar view model
-
-        for (let objIter of objMatch[1].matchAll(/"(?:start|end)Percent":\s*(\d+)/g)) {
-            intPercent = Math.max(intPercent === null ? 0 : intPercent, parseInt(objIter[1])); // the watched bar reaches its furthest edge
-        }
-
-        return intPercent;
-    }
-
-    return null;
-};
+// funcHackyparse, funcParsevideos and funcPercent live in the shared parse.js (loaded before this file) so the
+// service worker and the page-world hooks.js content script stay in sync instead of drifting apart as copies.
 
 // pulls the per-video "remove from watch history" tokens out of a parsed lockupViewModel, or null when it carries none
 let funcDeletetokens = function(objVideo) {
@@ -593,7 +498,7 @@ let Database = {
                 if (objDatabase.objectStoreNames.contains('storeDatabase') === true) {
                     objStore = objTransaction.objectStore('storeDatabase');
 
-                } else if (objDatabase.objectStoreNames.contains('storeDatabase') === false) {
+                } else {
                     objStore = objDatabase.createObjectStore('storeDatabase', {
                         'keyPath': 'strIdent',
                     });
@@ -669,7 +574,7 @@ let Database = {
                 'strIdent': objCursor.value.strIdent,
                 'intTimestamp': objCursor.value.intTimestamp,
                 'strTitle': objCursor.value.strTitle,
-                'strState': objCursor.value.strState || 'watched',
+                'strState': funcStoredstate(objCursor.value, 'database-export'),
                 'intPercent': objCursor.value.intPercent,
                 'intCount': objCursor.value.intCount,
                 'boolOpened': objCursor.value.boolOpened === true,
@@ -689,6 +594,10 @@ let Database = {
     },
 
     import: async function(objRequest, funcProgress) {
+        if (Array.isArray((objRequest || {}).objVideos) === false) {
+            return null;
+        }
+
         let intNew = 0;
         let intExisting = 0;
 
@@ -711,7 +620,7 @@ let Database = {
                 'strIdent': objVideo.strIdent,
                 'intTimestamp': objVideo.intTimestamp,
                 'strTitle': objVideo.strTitle,
-                'strState': objVideo.strState || 'watched', // older exports have no state so we keep them as watched
+                'strState': funcStoredstate(objVideo, 'database-import'), // a well-formed export always carries a state; a missing one is surfaced as watching (and warned about) instead of assumed watched
                 'intPercent': objVideo.intPercent,
                 'intCount': objVideo.intCount,
                 'boolOpened': objVideo.boolOpened === true,
@@ -762,6 +671,17 @@ let History = {
             if (objPort.name === 'history') {
                 objPort.onMessage.addListener(async function(objData) {
                     if (objData.strMessage === 'historySynchronize') {
+                        if (await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') !== String(true)) {
+                            objPort.postMessage({
+                                'strMessage': 'historySynchronize',
+                                'objResponse': {
+                                    'boolPaused': true,
+                                },
+                            });
+
+                            return;
+                        }
+
                         objPort.postMessage({
                             'strMessage': 'historySynchronize',
                             'objResponse': await History.synchronize(objData.objRequest, function(objResponse) {
@@ -801,11 +721,7 @@ let History = {
 
             let strIdent = objEntry.url.split('&')[0].slice(-11);
             let intTimestamp = objEntry.lastVisitTime;
-            let strTitle = objEntry.title;
-
-            if (strTitle.slice(-10) === ' - YouTube') {
-                strTitle = strTitle.slice(0, -10);
-            }
+            let strTitle = funcNormalizedyoutubetitle(objEntry.title);
 
             let objGet = await objDatabase.index('strIdent').get(strIdent);
 
@@ -817,12 +733,15 @@ let History = {
 
             }
 
-            // the browser history is part of the accumulated watch history - assume watched unless we tracked it here ourselves
+            let boolOpened = (objGet !== undefined) && (objGet !== null) && (objGet.boolOpened === true);
+
+            // the browser history only proves the page was opened. if the extension already tracked that local open,
+            // keep it watching until player progress or a stronger youtube-history signal proves completion.
             await funcRecord(objDatabase, {
                 'strIdent': strIdent,
                 'intTimestamp': intTimestamp,
                 'strTitle': strTitle,
-                'strState': 'watched',
+                'strState': boolOpened === true ? 'watching' : 'watched',
                 'boolAssumed': true,
                 'strSource': 'browser-history-import',
             });
@@ -881,7 +800,7 @@ let Youtube = {
         let intNew = 0;
         let intExisting = 0;
 
-        let intThreshold = parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 95;
+        let intThreshold = parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold')) || 99;
 
         let objContext = null;
         let strClicktrack = null;
@@ -936,10 +855,25 @@ let Youtube = {
                 }
 
                 // the youtube watch history could be from any device - the resume bar (red line) on the thumbnail decides how
-                // far it was actually watched: only a bar below the threshold is watching, a full bar or no bar at all (a short
-                // or a fully watched video carries none) counts as watched
+                // far it was actually watched: a full bar (>= threshold) is watched, a bar below the threshold is watching.
+                // when no percentage can be read at all we no longer assume watched: we surface it as watching and warn, so a
+                // parse regression (eg a new lockup ui shape) can never silently mass-flip the whole history to watched.
                 let intPercent = funcPercent(objVideo['objVideo']);
-                let strState = ((intPercent !== null) && (intPercent < intThreshold)) ? 'watching' : 'watched';
+                let strState = 'watched';
+
+                if (intPercent === null) {
+                    strState = 'watching';
+
+                    console.warn('[YWM state] history sync found no resume-bar percentage - treating as watching', {
+                        'strIdent': objVideo['strIdent'],
+                        'strTitle': objVideo['strTitle'],
+                        'strSource': 'youtube-history-sync',
+                    });
+
+                } else if (intPercent < intThreshold) {
+                    strState = 'watching';
+
+                }
 
                 await funcRecord(objDatabase, {
                     'strIdent': objVideo['strIdent'],
@@ -982,16 +916,58 @@ let Youtube = {
             return null;
         }
 
+        let strState = funcStoredstate(objGet, 'youtube-lookup');
+
         return {
             'strIdent': objGet.strIdent,
             'intTimestamp': objGet.intTimestamp || new Date().getTime(),
             'strTitle': objGet.strTitle || '',
-            'strState': objGet.strState || 'watched',
-            'intPercent': (objGet.strState || 'watched') === 'watched' ? 100 : (objGet.intPercent || 0),
+            'strState': strState,
+            'intPercent': strState === 'watched' ? 100 : (objGet.intPercent || 0),
             'intCount': objGet.intCount || 0,
             'strDebugSource': objGet.strDebugSource || '',
             'strDebugReason': objGet.strDebugReason || '',
             'intDebugTimestamp': objGet.intDebugTimestamp || 0,
+        };
+    },
+
+    forget: async function(objRequest) {
+        let strIdent = objRequest.strIdent || '';
+
+        if (strIdent.length !== 11) {
+            return null;
+        }
+
+        let objTransaction = Database.objDatabase.transaction(['storeDatabase'], 'readwrite');
+        let objDatabase = objTransaction.objectStore('storeDatabase');
+        let objGet = await objDatabase.index('strIdent').get(strIdent);
+
+        if ((objGet === undefined) || (objGet === null)) {
+            await objTransaction.done;
+            return {
+                'strIdent': strIdent,
+                'boolDeleted': false,
+            };
+        }
+
+        await objDatabase.delete(strIdent);
+        await funcStorageset('extensions.Youwatch.Database.intSize', await objDatabase.count());
+        await objTransaction.done;
+
+        if (objHistorycache !== null) {
+            delete objHistorycache.objTokens[strIdent];
+        }
+
+        console.debug('[YWM forget] removed from local database', {
+            'strIdent': strIdent,
+            'strTitle': objGet.strTitle || '',
+            'strSource': objRequest.strSource || 'unknown',
+        });
+
+        return {
+            'strIdent': strIdent,
+            'strTitle': objGet.strTitle || '',
+            'boolDeleted': true,
         };
     },
 
@@ -1002,17 +978,21 @@ let Youtube = {
         let objGet = await objDatabase.index('strIdent').get(objRequest.strIdent);
 
         // boolEnsure is set by the lightweight watching signals (open / 3s playback ping) - there is nothing left to do
-        // once a video is watched, with two exceptions: a live completion, and a resume from the middle that can demote
-        // an assumed (watched elsewhere, never confirmed here) watched back to watching
-        if ((objGet !== undefined) && (objGet !== null) && (objRequest.boolEnsure === true) && ((objGet.strState || 'watched') === 'watched') && (objRequest.boolCompleted !== true)) {
-            if ((objGet.boolConfirmed === true) || (objRequest.boolResume !== true)) {
+        // once a video is watched, with three exceptions: a live completion, a resume-bar reading, and live player
+        // progress from the middle that can demote an assumed (watched elsewhere, never confirmed here) watched back to watching
+        if ((objGet !== undefined) && (objGet !== null) && (objRequest.boolEnsure === true) && (funcStoredstate(objGet, 'youtube-mark') === 'watched') && (objRequest.boolCompleted !== true)) {
+            let boolLivePartial = (objRequest.boolOpened === true) && (objRequest.strState !== 'watched') && ((objRequest.intPercent || 0) >= 5);
+
+            // a confirmed/sticky mark still yields to fresh, real evidence of resuming from early in the video -
+            // only skip here when there is no such evidence at all
+            if ((objRequest.boolResume !== true) && (boolLivePartial !== true)) {
                 funcDebugmark('watched skip', objRequest, {
-                    'strReason': objGet.boolConfirmed === true ? 'existing watched mark is confirmed and sticky' : 'existing watched mark already satisfies lightweight ensure signal',
+                    'strReason': objGet.boolConfirmed === true ? 'existing watched mark is confirmed and sticky, and no fresh contrary evidence arrived' : 'existing watched mark already satisfies lightweight ensure signal',
                     'boolNew': false,
                     'boolStored': false,
-                    'strStateold': objGet.strState || 'watched',
-                    'strStatenew': objGet.strState || 'watched',
-                    'intPercentstored': (objGet.strState || 'watched') === 'watched' ? 100 : (objGet.intPercent || 0),
+                    'strStateold': 'watched',
+                    'strStatenew': 'watched',
+                    'intPercentstored': 100,
                     'intCountincrement': 0,
                     'boolOpened': objGet.boolOpened === true,
                     'boolConfirmed': objGet.boolConfirmed === true,
@@ -1033,6 +1013,7 @@ let Youtube = {
             'boolAssumed': objRequest.boolAssumed === true,
             'boolConfirmed': objRequest.boolConfirmed === true,
             'boolEnsure': objRequest.boolEnsure === true,
+            'boolShorts': objRequest.boolShorts === true,
             'strSource': objRequest.strSource || 'youtube-mark',
         });
 
@@ -1088,12 +1069,14 @@ let Search = {
                     objRequest.intSkip -= 1;
 
                 } else if (objRequest.intSkip === 0) {
+                    let strState = funcStoredstate(objCursor.value, 'search-lookup');
+
                     objVideos.push({
                         'strIdent': objCursor.value.strIdent,
                         'intTimestamp': objCursor.value.intTimestamp,
                         'strTitle': objCursor.value.strTitle,
-                        'strState': objCursor.value.strState || 'watched',
-                        'intPercent': (objCursor.value.strState || 'watched') === 'watched' ? 100 : (objCursor.value.intPercent || 0),
+                        'strState': strState,
+                        'intPercent': strState === 'watched' ? 100 : (objCursor.value.intPercent || 0),
                         'intCount': objCursor.value.intCount,
                     });
 
@@ -1306,11 +1289,9 @@ let Search = {
 // ##########################################################
 
 (async function() {
+    // the background runs whenever the service worker is alive (including right after a browser start), so a single
+    // keep-alive interval here is enough - a second one in onStartup only added a redundant timer after a restart
     setInterval(chrome.runtime.getPlatformInfo, 20000); // https://github.com/sniklaus/youtube-watchmarker/issues/179
-
-    chrome.runtime.onStartup.addListener(function() {
-        setInterval(chrome.runtime.getPlatformInfo, 20000); // https://github.com/sniklaus/youtube-watchmarker/issues/179
-    });
 
     if (await funcStorageget('extensions.Youwatch.Database.intSize') === null) {
         await funcStorageset('extensions.Youwatch.Database.intSize', 0);
@@ -1328,9 +1309,7 @@ let Search = {
         await funcStorageset('extensions.Youwatch.Condition.boolBrownav', true);
     }
 
-    if (await funcStorageget('extensions.Youwatch.Condition.boolBrowhist') === null) {
-        await funcStorageset('extensions.Youwatch.Condition.boolBrowhist', true);
-    }
+    await funcStorageset('extensions.Youwatch.Condition.boolBrowhist', false); // Firefox/browser history sync is paused because page visits are not reliable watch signals
 
     if (await funcStorageget('extensions.Youwatch.Condition.boolYouprog') === null) {
         await funcStorageset('extensions.Youwatch.Condition.boolYouprog', true);
@@ -1344,8 +1323,11 @@ let Search = {
         await funcStorageset('extensions.Youwatch.Condition.boolYouhist', true);
     }
 
-    if ((await funcStorageget('extensions.Youwatch.Condition.intThreshold') === null) || (isNaN(parseInt(await funcStorageget('extensions.Youwatch.Condition.intThreshold'))) === true)) {
-        await funcStorageset('extensions.Youwatch.Condition.intThreshold', 95); // the percentage of a video that has to be reached before it counts as watched
+    const strThreshold = await funcStorageget('extensions.Youwatch.Condition.intThreshold');
+    const intThreshold = parseInt(strThreshold);
+
+    if ((strThreshold === null) || (isNaN(intThreshold) === true) || (intThreshold === 95)) {
+        await funcStorageset('extensions.Youwatch.Condition.intThreshold', 99); // the percentage of a video that has to be reached before it counts as watched
     }
 
     if (await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === null) {
@@ -1368,6 +1350,10 @@ let Search = {
         await funcStorageset('extensions.Youwatch.Visualization.boolShowdate', false);
     }
 
+    if (await funcStorageget('extensions.Youwatch.Visualization.boolShowcount') === null) {
+        await funcStorageset('extensions.Youwatch.Visualization.boolShowcount', true);
+    }
+
     if (await funcStorageget('extensions.Youwatch.Visualization.strTheme') === null) {
         await funcStorageset('extensions.Youwatch.Visualization.strTheme', 'bw');
     }
@@ -1387,29 +1373,12 @@ let Search = {
         chrome.runtime.openOptionsPage();
     });
 
-    let funcBroadcast = function(objResult) { // push the resulting state to every open youtube tab so the marks update live
-        if ((objResult === null) || (objResult === undefined)) {
-            return;
+    chrome.runtime.onMessage.addListener(function(objRequest, objSender, funcResponse) {
+        // every youtube* message that carries a title feeds the shared title cache
+        if ((typeof objRequest.strIdent === 'string') && (typeof objRequest.strTitle === 'string') && (objRequest.strTitle !== '')) {
+            Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
         }
 
-        chrome.tabs.query({
-            'url': '*://*.youtube.com/*'
-        }, function(objTabs) {
-            for (let objTab of objTabs) {
-                chrome.tabs.sendMessage(objTab.id, {
-                    'strMessage': 'youtubeMark',
-                    'strIdent': objResult.strIdent,
-                    'intTimestamp': objResult.intTimestamp,
-                    'strTitle': objResult.strTitle,
-                    'strState': objResult.strState,
-                    'intPercent': objResult.intPercent,
-                    'intCount': objResult.intCount,
-                });
-            }
-        });
-    };
-
-    chrome.runtime.onMessage.addListener(function(objRequest, objSender, funcResponse) {
         if (objRequest.strMessage === 'themeApply') {
             funcApplytheme(objRequest.strTheme).then(function() {
                 funcResponse(true);
@@ -1418,10 +1387,6 @@ let Search = {
             return true; // indicate async response
 
         } else if (objRequest.strMessage === 'youtubeLookup') {
-            if (objRequest.strTitle !== '') {
-                Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
-            }
-
             Youtube.lookup({
                 'strIdent': objRequest.strIdent,
                 'strTitle': objRequest.strTitle,
@@ -1430,28 +1395,36 @@ let Search = {
             return true; // indicate async response, i also tried using an async function with await but could not make it work
 
         } else if (objRequest.strMessage === 'youtubeMark') {
-            if (objRequest.strTitle !== '') {
-                Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
-            }
-
             Youtube.mark({
                 'strIdent': objRequest.strIdent,
                 'intTimestamp': objRequest.intTimestamp || undefined, // the date youtube lists it under, when supplied from the history page
                 'strTitle': objRequest.strTitle,
                 'strState': objRequest.strState,
+                'intPercent': objRequest.intPercent,
                 'boolAssumed': objRequest.boolAssumed === true, // a watched coming from the youtube history page
                 'boolConfirmed': objRequest.boolConfirmed === true, // an explicit "mark as watched" that should stick
                 'boolEnsure': objRequest.boolEnsure,
                 'strSource': objRequest.strSource || (objRequest.boolConfirmed === true ? 'manual-mark' : (objRequest.boolAssumed === true ? 'youtube-history-page' : 'youtube-mark-message')),
-            }).then(funcResponse);
+            }).then(function(objResult) {
+                funcNotifywatchlist(objResult); // the history-page resume-bar scan can promote/demote a watchlisted video too
+                funcResponse(objResult);
+            });
 
             return true; // indicate async response, i also tried using an async function with await but could not make it work
 
-        } else if (objRequest.strMessage === 'youtubeComplete') {
-            if (objRequest.strTitle !== '') {
-                Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
-            }
+        } else if (objRequest.strMessage === 'youtubeForget') {
+            Youtube.forget({
+                'strIdent': objRequest.strIdent,
+                'strSource': objRequest.strSource || 'youtube-forget-message',
+            }).then(function(objResult) {
+                funcBroadcastforget(objResult);
+                funcNotifywatchlist(objResult);
+                funcResponse(objResult);
+            });
 
+            return true; // indicate async response
+
+        } else if (objRequest.strMessage === 'youtubeComplete') {
             // the player reported >= the threshold on the active video - this confirms a completed watch in this browser
             Youtube.mark({
                 'strIdent': objRequest.strIdent,
@@ -1464,16 +1437,30 @@ let Search = {
             }).then(function(objResult) {
                 funcBroadcast(objResult);
 
+                if ((objResult !== null) && (objResult !== undefined) && (objResult.strState === 'watched')) {
+                    let objWatchlist = {
+                        'strMessage': 'watchlist:completed',
+                        'strIdent': objResult.strIdent,
+                        'strTitle': objResult.strTitle,
+                        'intTimestamp': objResult.intTimestamp,
+                        'intPercent': 100,
+                    };
+
+                    if (typeof globalThis.funcWatchlistCompleted === 'function') {
+                        globalThis.funcWatchlistCompleted(objWatchlist);
+                    }
+
+                    chrome.runtime.sendMessage(objWatchlist, function() {
+                        void chrome.runtime.lastError;
+                    });
+                }
+
                 funcResponse(objResult);
             });
 
             return true; // indicate async response, i also tried using an async function with await but could not make it work
 
         } else if (objRequest.strMessage === 'youtubeWatching') {
-            if (objRequest.strTitle !== '') {
-                Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
-            }
-
             // the active player is below the threshold - record live progress (and a resume from the middle can demote an assumed watched)
             Youtube.mark({
                 'strIdent': objRequest.strIdent,
@@ -1484,9 +1471,11 @@ let Search = {
                 'boolOpened': true,
                 'boolResume': objRequest.boolResume === true,
                 'boolEnsure': true,
+                'boolShorts': objRequest.boolShorts === true,
                 'strSource': 'player-progress',
             }).then(function(objResult) {
                 funcBroadcast(objResult);
+                funcNotifywatchlist(objResult);
 
                 funcResponse(objResult);
             });
@@ -1494,34 +1483,34 @@ let Search = {
             return true; // indicate async response, i also tried using an async function with await but could not make it work
 
         } else if (objRequest.strMessage === 'youtubeProgress') {
-            if (objRequest.strTitle !== '') {
-                Youtube.strTitlecache[objRequest.strIdent] = objRequest.strTitle;
-            }
-
             // a feed/history thumbnail with a resume progress bar - the percentage decides watching vs watched, and a
             // partial bar (treated as a resume reading) can demote an assumed (watched elsewhere, not confirmed) watched
             funcStorageget('extensions.Youwatch.Condition.intThreshold')
                 .then(function(strThreshold) {
-                    let intThreshold = parseInt(strThreshold) || 95;
+                    let intThreshold = parseInt(strThreshold) || 99;
                     let strState = ((objRequest.intPercent !== undefined) && (objRequest.intPercent !== null) && (objRequest.intPercent >= intThreshold)) ? 'watched' : 'watching';
 
                     funcStorageget('extensions.Youwatch.Condition.boolYoubadge')
                         .then(function(strValue) {
-                            if (strValue === String(true)) {
-                                Youtube.mark({
-                                    'strIdent': objRequest.strIdent,
-                                    'strTitle': objRequest.strTitle,
-                                    'strState': strState,
-                                    'intPercent': objRequest.intPercent,
-                                    'boolResume': strState === 'watching',
-                                    'boolEnsure': objRequest.boolEnsure,
-                                    'strSource': 'thumbnail-progress',
-                                }).then(function(objResult) {
-                                    funcBroadcast(objResult);
-
-                                    funcResponse(objResult);
-                                });
+                            if (strValue !== String(true)) {
+                                funcResponse(null); // badge disabled - still close the message channel so it does not leak
+                                return;
                             }
+
+                            Youtube.mark({
+                                'strIdent': objRequest.strIdent,
+                                'strTitle': objRequest.strTitle,
+                                'strState': strState,
+                                'intPercent': objRequest.intPercent,
+                                'boolResume': strState === 'watching',
+                                'boolEnsure': objRequest.boolEnsure,
+                                'strSource': 'thumbnail-progress',
+                            }).then(function(objResult) {
+                                funcBroadcast(objResult);
+                                funcNotifywatchlist(objResult);
+
+                                funcResponse(objResult);
+                            });
                         })
                     ;
                 })
@@ -1541,64 +1530,45 @@ let Search = {
 
         }
 
-        if (await funcStorageget('extensions.Youwatch.Condition.boolBrownav') === String(true)) {
-            if ((objTab.url.indexOf('.youtube.com/watch?v=') !== -1) || (objTab.url.indexOf('.youtube.com/shorts/') !== -1)) {
-                if ((objChange.title !== undefined) && (objChange.title !== null)) {
-                    let strIdent = objTab.url.split('&')[0].slice(-11);
-                    let strTitle = objChange.title;
+        if ((objChange.title !== undefined) && (objChange.title !== null)) {
+            await funcMarktabopen(objTab, objChange.title);
+        }
 
-                    if (strTitle.slice(-10) === ' - YouTube') {
-                        strTitle = strTitle.slice(0, -10);
-                    }
+        // only (re)inject the mark stylesheets once the document has finished loading. onUpdated fires several times per
+        // navigation (url, title, favicon, ...); injecting on each one piled duplicate copies of every stylesheet into
+        // the tab. a full document load clears the previously injected css, and spa navigations reuse the same document,
+        // so the single injection at "complete" is all that is needed.
+        if (objChange.status !== 'complete') {
+            return;
+        }
 
-                    // opening a video only means it was opened here - it stays watching until the player reaches the threshold
-                    let objResult = await Youtube.mark({
-                        'strIdent': strIdent,
-                        'strTitle': strTitle,
-                        'strState': 'watching',
-                        'boolOpened': true,
-                        'boolEnsure': true,
-                        'strSource': 'tab-open',
-                    });
+        await funcMarktabopen(objTab);
 
-                    funcBroadcast(objResult);
-                }
+        // each stylesheet is gated by its visualization flag (the date badge additionally needs the badge itself);
+        // one batched storage read replaces the previous per-stylesheet round-trips
+        let objStylesheets = [
+            { 'strFlag': 'boolFadeout', 'strSheet': 'strFadeout' },
+            { 'strFlag': 'boolGrayout', 'strSheet': 'strGrayout' },
+            { 'strFlag': 'boolShowbadge', 'strSheet': 'strShowbadge' },
+            { 'strFlag': 'boolShowwatching', 'strSheet': 'strShowwatching' },
+            { 'strFlag': 'boolShowdate', 'strSheet': 'strShowdate', 'strRequires': 'boolShowbadge' },
+            { 'strFlag': 'boolShowcount', 'strSheet': 'strShowcount' },
+        ];
+
+        let objSettings = await chrome.storage.local.get(objStylesheets.flatMap(function(objEntry) {
+            return ['extensions.Youwatch.Visualization.' + objEntry.strFlag, 'extensions.Youwatch.Stylesheet.' + objEntry.strSheet];
+        }));
+
+        for (let objEntry of objStylesheets) {
+            let boolEnabled = String(objSettings['extensions.Youwatch.Visualization.' + objEntry.strFlag]) === String(true);
+            let boolRequired = (objEntry.strRequires === undefined) || (String(objSettings['extensions.Youwatch.Visualization.' + objEntry.strRequires]) === String(true));
+
+            if ((boolEnabled === true) && (boolRequired === true)) {
+                chrome.scripting.insertCSS({
+                    target: { tabId: objTab.id },
+                    css: objSettings['extensions.Youwatch.Stylesheet.' + objEntry.strSheet],
+                });
             }
-        }
-
-        if (await funcStorageget('extensions.Youwatch.Visualization.boolFadeout') === String(true)) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strFadeout'),
-            });
-        }
-
-        if (await funcStorageget('extensions.Youwatch.Visualization.boolGrayout') === String(true)) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strGrayout'),
-            });
-        }
-
-        if (await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true)) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strShowbadge'),
-            });
-        }
-
-        if (await funcStorageget('extensions.Youwatch.Visualization.boolShowwatching') === String(true)) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strShowwatching'),
-            });
-        }
-
-        if ((await funcStorageget('extensions.Youwatch.Visualization.boolShowbadge') === String(true)) && (await funcStorageget('extensions.Youwatch.Visualization.boolShowdate') === String(true))) {
-            chrome.scripting.insertCSS({
-                target: { tabId: objTab.id },
-                css: await funcStorageget('extensions.Youwatch.Stylesheet.strShowdate'),
-            });
         }
     });
 
@@ -1608,18 +1578,30 @@ let Search = {
                 return;
             }
 
-            for (let strElapsed of objData.url.split('&et=')[1].split('&')[0].split(',')) {
+            // not every watchtime request carries et= / docid= - reading them defensively avoids throwing on the ones that don't
+            let objParams = null;
+
+            try {
+                objParams = new URL(objData.url).searchParams;
+            } catch (objError) {
+                return;
+            }
+
+            let strElapsedlist = objParams.get('et');
+            let strIdent = objParams.get('docid') || '';
+
+            if ((strElapsedlist === null) || (strIdent.length !== 11)) {
+                return;
+            }
+
+            for (let strElapsed of strElapsedlist.split(',')) {
                 if (parseFloat(strElapsed) < 3.0) {
                     continue;
                 }
 
-                let strIdent = objData.url.split('&docid=')[1].split('&')[0];
                 let strTitle = Youtube.strTitlecache.hasOwnProperty(strIdent) === true ? Youtube.strTitlecache[strIdent] : '';
 
-                if (strIdent.length !== 11) {
-                    continue;
-
-                } else if (strTitle === '') {
+                if (strTitle === '') {
                     continue;
 
                 }
@@ -1635,6 +1617,7 @@ let Search = {
                 });
 
                 funcBroadcast(objResult);
+                funcNotifywatchlist(objResult);
             }
         }
     }, {

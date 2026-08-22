@@ -2,239 +2,8 @@
 
 // ##########################################################
 
-let funcHackyparse = function(strJson) {
-    let intLength = 1;
-
-    for (let intCount = 0; intLength < strJson.length; intLength += 1) {
-        if (strJson[intLength - 1] === '{') {
-            intCount += 1;
-
-        } else if (strJson[intLength - 1] === '}') {
-            intCount -= 1;
-
-        }
-
-        if (intCount === 0) {
-            break;
-        }
-    }
-
-    try {
-        return JSON.parse(strJson.substr(0, intLength));
-    } catch (objError) {
-        // ...
-    }
-
-    return null;
-};
-
-let funcParsevideos = function(strText, boolProgress) {
-    let objVideos = [];
-
-    if (strText.indexOf('\\x22responseContext\\x22') !== -1) {
-        strText = strText.replace(new RegExp('\\\\x([0-9a-f][0-9a-f])', 'g'), function(objMatch) {
-            return String.fromCharCode(parseInt(objMatch.substr(2), 16));
-        });
-    }
-
-    for (let strVideo of strText.split('{"lockupViewModel":').slice(1)) {
-        let objVideo = funcHackyparse('{"lockupViewModel":' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"thumbnailOverlayProgressBarViewModel"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['lockupViewModel']['contentId'];
-        let strTitle = null;
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['lockupViewModel']['metadata']['lockupMetadataViewModel']['title']['content'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['lockupViewModel']['rendererContext']['accessibilityContext']['label'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strIdent.length !== 11) {
-            continue;
-
-        } else if (strTitle === null) {
-            continue;
-
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"videoWithContextRenderer":').slice(1)) {
-        let objVideo = funcHackyparse('{"videoWithContextRenderer":' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"startTimeSeconds"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['videoWithContextRenderer']['videoId'];
-        let strTitle = null;
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['videoWithContextRenderer']['headline']['runs'][0]['text'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strTitle === null) {
-            try {
-                strTitle = objVideo['videoWithContextRenderer']['headline']['accessibility']['accessibilityData']['label'];
-            } catch (objError) {
-                // ...
-            }
-        }
-
-        if (strIdent.length !== 11) {
-            continue;
-
-        } else if (strTitle === null) {
-            continue;
-
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"videoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"videoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['videoRenderer']['videoId'];
-        let strTitle = objVideo['videoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"compactVideoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"compactVideoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['compactVideoRenderer']['videoId'];
-        let strTitle = objVideo['compactVideoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    for (let strVideo of strText.split('{"playlistVideoRenderer":{"videoId":"').slice(1)) {
-        let objVideo = funcHackyparse('{"playlistVideoRenderer":{"videoId":"' + strVideo);
-
-        if (objVideo === null) {
-            continue;
-        }
-
-        if (boolProgress === true) {
-            if (JSON.stringify(objVideo).indexOf('"percentDurationWatched"') === -1) {
-                continue;
-            }
-        }
-
-        let strIdent = objVideo['playlistVideoRenderer']['videoId'];
-        let strTitle = objVideo['playlistVideoRenderer']['title']['runs'][0]['text'];
-
-        if (strIdent.length !== 11) {
-            continue;
-        }
-
-        objVideos.push({
-            'objVideo': objVideo,
-            'strIdent': strIdent,
-            'strTitle': strTitle,
-        })
-    }
-
-    return objVideos;
-};
-
-let funcPercent = function(objVideo) { // the resume progress bar (red line) reports how much of the video has been watched
-    let strJson = JSON.stringify(objVideo);
-    let objMatch = null;
-
-    if ((objMatch = strJson.match(/"percentDurationWatched":\s*(\d+)/)) !== null) {
-        return parseInt(objMatch[1]); // videoRenderer / compactVideoRenderer / playlistVideoRenderer carry it directly
-    }
-
-    if ((objMatch = strJson.match(/"thumbnailOverlayProgressBarViewModel":\s*\{([^{}]*)\}/)) !== null) {
-        let intPercent = null; // the newer lockupViewModel exposes the watched extent through the resume bar view model
-
-        for (let objIter of objMatch[1].matchAll(/"(?:start|end)Percent":\s*(\d+)/g)) {
-            intPercent = Math.max(intPercent === null ? 0 : intPercent, parseInt(objIter[1])); // the watched bar reaches its furthest edge
-        }
-
-        return intPercent;
-    }
-
-    return null;
-};
+// funcHackyparse, funcParsevideos and funcPercent live in the shared parse.js, loaded before this file by the
+// MAIN-world content_scripts entry, so the page-world parsing here stays identical to the service worker's.
 
 let funcEmitvideos = function(strText) {
     for (let objVideo of funcParsevideos(strText, true)) {
@@ -256,10 +25,134 @@ window.addEventListener('DOMContentLoaded', function() {
 
 // ##########################################################
 
+// youtube stores the resume position (the red bar on thumbnails and in the history) from periodic
+// api/stats/watchtime beacons, but the last heartbeat usually lands a few seconds before the end, leaving a fully
+// watched video stuck at 9x% - so the newest beacon url is remembered per video and replayed with the playhead
+// pinned to the full duration once the player fires 'ended', making youtube record it as watched to 100%
+let objWatchtimeurl = {};
+let objWatchtimedone = {};
+let objWatchtimecpn = {};
+
+let funcWatchtimecapture = function(strUrl) {
+    if ((typeof strUrl !== 'string') || (strUrl.indexOf('/api/stats/watchtime') === -1)) {
+        return;
+    }
+
+    try {
+        let objUrl = new URL(strUrl, window.location.origin);
+        let strDocid = objUrl.searchParams.get('docid');
+
+        if (strDocid !== null) {
+            let strCpn = objUrl.searchParams.get('cpn');
+
+            objWatchtimeurl[strDocid] = objUrl.toString();
+
+            if (strCpn !== objWatchtimecpn[strDocid]) {
+                objWatchtimecpn[strDocid] = strCpn; // a new client playback nonce means a fresh playback session, so
+                objWatchtimedone[strDocid] = false; // allow another finalize - later beacons of the same session do not re-arm it
+            }
+
+            console.debug('[YWM wt] captured beacon', {
+                'strDocid': strDocid,
+                'strCmt': objUrl.searchParams.get('cmt'),
+                'strHost': objUrl.host,
+            });
+        }
+
+    } catch (objError) {
+        // ...
+    }
+};
+
+let funcWatchtimefinalize = function(objVideoel, strTrigger) {
+    let objPlayer = window.document.getElementById('movie_player');
+
+    if ((objPlayer === null) || (typeof objPlayer.getVideoData !== 'function')) {
+        console.debug('[YWM wt] finalize skipped - no player api', { 'strTrigger': strTrigger });
+        return;
+    }
+
+    let strDocid = null;
+
+    try {
+        strDocid = (objPlayer.getVideoData() || {}).video_id || null;
+
+    } catch (objError) {
+        return;
+    }
+
+    let fltDuration = objVideoel.duration;
+
+    if ((strDocid === null) || (objWatchtimedone[strDocid] === true) || (isFinite(fltDuration) !== true) || (fltDuration <= 0.0)) {
+        return;
+    }
+
+    if (objWatchtimeurl[strDocid] === undefined) {
+        console.debug('[YWM wt] finalize skipped - no beacon captured for this video', {
+            'strDocid': strDocid,
+            'strTrigger': strTrigger,
+            'objCaptured': Object.keys(objWatchtimeurl),
+        });
+        return;
+    }
+
+    objWatchtimedone[strDocid] = true;
+
+    let objUrl = new URL(objWatchtimeurl[strDocid]);
+    let strEnd = Math.max(0.0, fltDuration - 0.1).toFixed(3);
+
+    objUrl.searchParams.set('st', Math.max(0.0, fltDuration - 0.6).toFixed(3)); // a short real interval at the very
+    objUrl.searchParams.set('et', strEnd); // end - zero-length segments risk being discarded by the stats endpoint
+    objUrl.searchParams.set('cmt', strEnd);
+    objUrl.searchParams.set('final', '1');
+
+    console.debug('[YWM wt] finalizing', {
+        'strDocid': strDocid,
+        'strTrigger': strTrigger,
+        'strCmt': strEnd,
+    });
+
+    objFetch(objUrl.toString(), {
+        'credentials': 'include',
+    }).then(function(objResponse) {
+        console.debug('[YWM wt] finalize response', {
+            'strDocid': strDocid,
+            'intStatus': objResponse.status,
+        });
+
+    }).catch(function(objError) {
+        console.debug('[YWM wt] finalize failed', {
+            'strDocid': strDocid,
+            'strError': String(objError),
+        });
+    });
+};
+
+let funcWatchtimeevent = function(objEvent) {
+    if (((objEvent.target instanceof HTMLVideoElement) !== true) || (objEvent.target.closest('#movie_player') === null)) {
+        return; // only the main player counts - inline previews and thumbnail hovers end too
+    }
+
+    if ((objEvent.type === 'timeupdate') && ((isFinite(objEvent.target.duration) !== true) || (objEvent.target.currentTime < (objEvent.target.duration - 1.0)))) {
+        return; // the timeupdate path only acts within the last second, as a fallback for players that never fire 'ended'
+    }
+
+    funcWatchtimefinalize(objEvent.target, objEvent.type);
+};
+
+// neither media event bubbles, but a capturing listener on the document still sees them
+document.addEventListener('ended', funcWatchtimeevent, true);
+document.addEventListener('timeupdate', funcWatchtimeevent, true);
+
+// ##########################################################
+
 let objXhr = window.XMLHttpRequest.prototype.open;
 let objFetch = window.fetch;
+let objBeacon = window.navigator.sendBeacon;
 
 window.XMLHttpRequest.prototype.open = function() {
+    funcWatchtimecapture(arguments[1]);
+
     this.addEventListener('load', function() {
         if (this.responseURL.indexOf('.youtube.com/youtubei/v1/') !== -1) {
             funcEmitvideos(this.responseText);
@@ -269,18 +162,28 @@ window.XMLHttpRequest.prototype.open = function() {
     return objXhr.apply(this, arguments);
 };
 
+if (typeof objBeacon === 'function') {
+    window.navigator.sendBeacon = function() {
+        funcWatchtimecapture(arguments[0]);
+
+        return objBeacon.apply(window.navigator, arguments);
+    };
+}
+
 window.fetch = async function(objRequest, objOptions) {
     let objResponse = await objFetch(objRequest, objOptions);
 
-    if ((typeof(objRequest) === 'string' ? objRequest : objRequest.url).indexOf('.youtube.com/youtubei/v1/') !== -1) {
-        let strResponse = await objResponse.text();
+    let strUrl = (typeof objRequest === 'string') ? objRequest : ((objRequest instanceof Request) ? objRequest.url : String(objRequest));
 
-        funcEmitvideos(strResponse);
+    funcWatchtimecapture(strUrl);
 
-        objResponse = new Response(strResponse, {
-            'status': objResponse.status,
-            'statusText': objResponse.statusText,
-            'headers': objResponse.headers,
+    if (strUrl.indexOf('.youtube.com/youtubei/v1/') !== -1) {
+        // read a clone off to the side instead of buffering the whole body before the page gets it - the original
+        // response is returned straight away so youtube's own navigation is not held up while we scan for videos
+        objResponse.clone().text().then(function(strResponse) {
+            funcEmitvideos(strResponse);
+        }).catch(function() {
+            // ...
         });
     }
 

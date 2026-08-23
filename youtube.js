@@ -16,9 +16,8 @@ let intHistorymenutime = 0;
 let objHistoryremoved = {}; // de-duplicates native youtube history removal messages
 let objActivelookups = {}; // strIdent -> true while the active player state lookup is in flight
 let objActivelabelmisses = {}; // strIdent -> true after an active player lookup found no stored state
-let objActivelabelsuppressed = {}; // strIdent -> true after playback starts in this page session
-let objActiveplaylisteners = new WeakSet();
 let objActivelabel = null;
+let intActivelabelwait = null; // retry timer while the theme stylesheet has not reached the tab yet
 let intThreshold = 99; // the percentage of a video that counts as watched, kept in sync with the settings
 let boolYouhist = true; // whether videos shown on the youtube history page should be marked as watched
 let objObservers = new WeakMap();
@@ -500,13 +499,15 @@ document.addEventListener('play', function(objEvent) {
         return;
     }
 
-    let strIdent = funcActiveident();
+    funcActivelabelhide();
+}, true);
 
-    if ((strIdent !== null) && (strIdent.length === 11)) {
-        objActivelabelsuppressed[strIdent] = true;
+document.addEventListener('pause', function(objEvent) {
+    if ((objEvent.target === null) || (objEvent.target.tagName !== 'VIDEO')) {
+        return;
     }
 
-    funcActivelabelhide();
+    funcActivelabelsync();
 }, true);
 
 // ##########################################################
@@ -617,17 +618,11 @@ let funcActivelabelnode = function() {
     if (objActivelabel === null) {
         objActivelabel = window.document.createElement('div');
         objActivelabel.className = 'youwatch-active-label';
-        objActivelabel.style.backgroundColor = '#0f0f0f';
-        objActivelabel.style.borderRadius = '8px';
-        objActivelabel.style.boxShadow = '0px 1px 4px rgba(0,0,0,0.45)';
-        objActivelabel.style.color = '#ffffff';
-        objActivelabel.style.fontFamily = 'Roboto, Arial, sans-serif';
-        objActivelabel.style.fontSize = '12px';
-        objActivelabel.style.fontWeight = '500';
+        objActivelabel.appendChild(window.document.createElement('span')).className = 'youwatch-active-icon';
+        objActivelabel.appendChild(window.document.createElement('span')).className = 'youwatch-active-text';
+        objActivelabel.querySelector('.youwatch-active-icon').textContent = '\u27f3';
         objActivelabel.style.left = '12px';
-        objActivelabel.style.lineHeight = 'normal';
-        objActivelabel.style.opacity = '0.95';
-        objActivelabel.style.padding = '5px 8px';
+        objActivelabel.style.visibility = 'hidden';
         objActivelabel.style.pointerEvents = 'none';
         objActivelabel.style.position = 'absolute';
         objActivelabel.style.top = '12px';
@@ -646,41 +641,23 @@ let funcActivelabelstate = function(objData) {
         return '';
     }
 
-    if (objData.strState === 'watched') {
-        return 'WATCHED';
+    let intCount = Math.max(0, parseInt(objData.intCount) || 0);
+    let boolWatched = objData.strState === 'watched';
+    let intPercent = Math.max(0, Math.min(100, objData.intPercent || 0));
+
+    if ((boolWatched === false) && (intPercent === 0) && (intCount === 0)) {
+        return ''; // nothing has happened with this video yet, so there is nothing worth putting over the player
     }
 
-    if ((objData.intPercent || 0) > 0) {
-        return 'WATCHING ' + Math.max(0, Math.min(100, objData.intPercent || 0)) + '%';
-    }
+    let strState = boolWatched === true ? 'WATCHED' : ('WATCHING ' + intPercent + '%');
 
-    return '';
+    return (intCount === 0) ? strState : (intCount + ' \u00b7 ' + strState); // no completed view means no count to report
 };
 
 let funcActiveplaying = function() {
     let objVideoel = funcAnyvideoel();
 
     return (objVideoel !== null) && (objVideoel.paused !== true) && (objVideoel.ended !== true);
-};
-
-let funcActivelabelplaylistener = function() {
-    let objVideoel = funcAnyvideoel();
-
-    if ((objVideoel === null) || (objActiveplaylisteners.has(objVideoel) === true)) {
-        return;
-    }
-
-    objActiveplaylisteners.add(objVideoel);
-
-    objVideoel.addEventListener('play', function() {
-        let strIdent = funcActiveident();
-
-        if ((strIdent !== null) && (strIdent.length === 11)) {
-            objActivelabelsuppressed[strIdent] = true;
-        }
-
-        funcActivelabelhide();
-    });
 };
 
 let funcActivelabellookup = function(strIdent) {
@@ -711,6 +688,12 @@ let funcActivelabellookup = function(strIdent) {
             };
         } else {
             objActivelabelmisses[strIdent] = true;
+            objVideodata[strIdent] = {
+                'intTimestamp': new Date().getTime(),
+                'strState': 'watching',
+                'intPercent': 0,
+                'intCount': 0,
+            };
         }
 
         if (funcActiveident() === strIdent) {
@@ -722,13 +705,7 @@ let funcActivelabellookup = function(strIdent) {
 let funcActivelabelsync = function() {
     let strIdent = funcActiveident();
 
-    funcActivelabelplaylistener();
-
-    if ((strIdent !== null) && (strIdent.length === 11) && (funcActiveplaying() === true)) {
-        objActivelabelsuppressed[strIdent] = true;
-    }
-
-    if ((strIdent === null) || (strIdent.length !== 11) || (objActivelabelsuppressed[strIdent] === true)) {
+    if ((strIdent === null) || (strIdent.length !== 11) || (funcActiveplaying() === true)) {
         funcActivelabelhide();
         return;
     }
@@ -754,9 +731,26 @@ let funcActivelabelsync = function() {
         return;
     }
 
-    objLabel.textContent = strLabel;
-    objLabel.style.backgroundColor = objVideodata[strIdent].strState === 'watched' ? '#0f0f0f' : '#ff8f00';
-    objLabel.style.color = objVideodata[strIdent].strState === 'watched' ? '#ffffff' : '#0f0f0f';
+    objLabel.querySelector('.youwatch-active-text').textContent = strLabel;
+    objLabel.querySelector('.youwatch-active-icon').style.display = (Math.max(0, parseInt(objVideodata[strIdent].intCount) || 0) === 0) ? 'none' : '';
+
+    // the colours belong to the theme, so the state only picks a class - inline colours here would override the stylesheet
+    objLabel.className = 'youwatch-active-label ' + (objVideodata[strIdent].strState === 'watched' ? 'youwatch-active-watched' : 'youwatch-active-watching');
+
+    // the background injects the theme stylesheet only once the tab reports "complete", so the label would briefly render
+    // as unstyled text - it stays hidden until the sheet is actually in effect and then appears already styled. the div
+    // has no inline display, so a computed "flex" can only come from the stylesheet having arrived
+    if (window.getComputedStyle(objLabel).display === 'flex') {
+        objLabel.style.visibility = '';
+
+    } else if (intActivelabelwait === null) {
+        intActivelabelwait = window.setTimeout(function() { // the dom-dirty poll stops on a settled page, so retry on our own
+            intActivelabelwait = null;
+
+            funcActivelabelsync();
+        }, 100);
+
+    }
 };
 
 // the url (funcActiveident) updates via pushState before the player finishes swapping its stream, so right after a
@@ -866,7 +860,6 @@ let eventhandler = function() {
     objCompleted = {}; // a navigation starts a fresh watch, so a re-watch of the same video counts again (and shorts loops do not)
     objReported = {};
     objReporttime = {};
-    objActivelabelsuppressed = {};
     funcActivelabelhide();
 
     // the mutation observer marks the dom dirty as youtube streams the thumbnails in, and the polling loop below then

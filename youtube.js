@@ -6,6 +6,7 @@ let objVideodata = {}; // strIdent -> { intTimestamp, strState, intPercent, intC
 let objCompleted = {}; // strIdent -> true once the active player has crossed the threshold in this session
 let objReported = {}; // strIdent -> last whole percent we reported to the background while watching
 let objReporttime = {}; // strIdent -> last timestamp we reported while the player was active
+let strProgressnav = null; // active page/video key whose completion and progress guards the maps above belong to
 let objDebugmarked = {}; // de-duplicates watched badge debug output for the same stored decision
 let objDebughistory = {}; // de-duplicates missing history progress diagnostics
 let objHistoryharvested = new WeakSet(); // history thumbnails whose resume bar has already been read once - a bar is only
@@ -305,7 +306,60 @@ let funcUnmark = function(objVideo) {
         }
 
         objVideo.style.removeProperty('--youwatch-percent');
+
+        let objLabel = objVideo.querySelector('.youwatch-thumbnail-label');
+
+        if (objLabel !== null) {
+            objLabel.parentNode.removeChild(objLabel);
+        }
     }
+};
+
+let funcThumbnaillabel = function(objVideo, objData) {
+    let objLabel = objVideo.querySelector('.youwatch-thumbnail-label');
+
+    if (objLabel === null) {
+        objLabel = window.document.createElement('div');
+        objLabel.className = 'youwatch-thumbnail-label';
+        objLabel.setAttribute('aria-hidden', 'true');
+        objLabel.style.display = 'none'; // the enabled WATCHED / WATCHING stylesheet reveals it once injected
+        objLabel.style.left = '8px';
+        objLabel.style.pointerEvents = 'none';
+        objLabel.style.position = 'absolute';
+        objLabel.style.top = '8px';
+        objLabel.style.zIndex = '3';
+
+        let objIcon = objLabel.appendChild(window.document.createElement('span'));
+        objIcon.className = 'youwatch-thumbnail-icon';
+        objIcon.textContent = '\u27f3';
+        objIcon.style.display = 'none';
+        objIcon.style.fontSize = '1.25em';
+        objIcon.style.lineHeight = '1';
+        objIcon.style.marginRight = '1px';
+        objIcon.style.transform = 'translateY(-1px)';
+
+        let objCount = objLabel.appendChild(window.document.createElement('span'));
+        objCount.className = 'youwatch-thumbnail-count';
+        objCount.style.display = 'none';
+
+        let objSeparator = objLabel.appendChild(window.document.createElement('span'));
+        objSeparator.className = 'youwatch-thumbnail-separator';
+        objSeparator.textContent = '\u00b7';
+        objSeparator.style.display = 'none';
+        objSeparator.style.margin = '0 3px';
+
+        objLabel.appendChild(window.document.createElement('span')).className = 'youwatch-thumbnail-state';
+        objVideo.appendChild(objLabel);
+    }
+
+    let boolWatched = objData.strState === 'watched';
+    let intCount = Math.max(0, parseInt(objData.intCount) || 0);
+    let intPercent = Math.max(0, Math.min(100, objData.intPercent || 0));
+    let objState = objLabel.querySelector('.youwatch-thumbnail-state');
+
+    objLabel.querySelector('.youwatch-thumbnail-count').textContent = intCount;
+    objState.textContent = boolWatched === true ? 'WATCHED' : ('WATCHING' + (intPercent > 0 ? (' ' + intPercent + '%') : ''));
+    objState.setAttribute('watchdate', objVideo.getAttribute('watchdate') || '');
 };
 
 let forget = function(strIdent) {
@@ -367,7 +421,7 @@ let mark = function(objVideo, strIdent) {
             objVideo.setAttribute('watchdate', ' - ' + new Date(objData.intTimestamp).toISOString().split('T')[0].split('-').join('.'));
         }
 
-        objVideo.setAttribute('watchcount', objData.intCount || 0);
+        objVideo.setAttribute('watchcount', Math.max(0, parseInt(objData.intCount) || 0));
 
         if ((boolWatched === false) && (objData.intPercent > 0)) {
             objVideo.setAttribute('watchpercent', objData.intPercent); // drives the "WATCHING NN%" badge for in-progress videos
@@ -379,6 +433,8 @@ let mark = function(objVideo, strIdent) {
 
             objVideo.style.removeProperty('--youwatch-percent');
         }
+
+        funcThumbnaillabel(objVideo, objData);
 
     } else {
         funcUnmark(objVideo);
@@ -857,9 +913,16 @@ document.addEventListener('visibilitychange', async function() {
 // ##########################################################
 
 let eventhandler = function() {
-    objCompleted = {}; // a navigation starts a fresh watch, so a re-watch of the same video counts again (and shorts loops do not)
-    objReported = {};
-    objReporttime = {};
+    let strIdent = funcActiveident();
+    let strProgresskey = window.location.pathname + ':' + (strIdent || '');
+
+    if (strProgressnav !== strProgresskey) {
+        strProgressnav = strProgresskey;
+        objCompleted = {}; // only a real page/video change starts a fresh watch; youtube emits the events below repeatedly
+        objReported = {};
+        objReporttime = {};
+    }
+
     funcActivelabelhide();
 
     // the mutation observer marks the dom dirty as youtube streams the thumbnails in, and the polling loop below then

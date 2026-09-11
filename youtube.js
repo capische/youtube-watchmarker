@@ -9,7 +9,7 @@ let objReporttime = {}; // strIdent -> last timestamp we reported while the play
 let strProgressnav = null; // active page/video key whose completion and progress guards the maps above belong to
 let objDebugmarked = {}; // de-duplicates watched badge debug output for the same stored decision
 let objDebughistory = {}; // de-duplicates missing history progress diagnostics
-let objHistoryharvested = new WeakSet(); // history thumbnails whose resume bar has already been read once - a bar is only
+let objProgressharvested = new WeakSet(); // thumbnails (any page) whose resume bar has already been read once - a bar is only
 // fresh when its element first renders (page load / scrolled in); later rescans of the same element (tab re-activation,
 // dom mutations) would re-read a stale bar and could wrongly re-mark or demote, so those become plain lookups instead
 let strHistorymenuident = null; // video id for the history row whose youtube menu was last opened
@@ -198,11 +198,15 @@ let refresh = async function() {
         let strTitle = '';
 
         let boolHistory = (objHistory !== null) && (boolYouhist === true) && (objHistory.contains(objVideo) === true);
-        let intPercent = ((boolHistory === true) && (objHistoryharvested.has(objVideo) !== true)) ? funcProgresspercent(objVideo) : null;
-        let boolHistorymark = (boolHistory === true) && (intPercent !== null);
+        // the resume bar (red line) is read on every page, not just history - a home page / sidebar / streams tab
+        // thumbnail carries the exact same overlay, and reading it directly keeps our badge in sync with what youtube
+        // is already showing instead of waiting for the (possibly stale) percent from our own player tracking.
+        let intPercent = (objProgressharvested.has(objVideo) !== true) ? funcProgresspercent(objVideo) : null;
+        let boolProgressfound = (intPercent !== null);
+        let boolHistorymark = (boolHistory === true) && (boolProgressfound === true);
 
-        if (boolHistorymark === true) {
-            objHistoryharvested.add(objVideo); // only once a bar was actually read - thumbnails whose overlay has not
+        if (boolProgressfound === true) {
+            objProgressharvested.add(objVideo); // only once a bar was actually read - thumbnails whose overlay has not
         } // rendered yet stay eligible, so the usual few-rescans-after-load retry behaviour is kept
 
         mark(objVideo, strIdent);
@@ -211,9 +215,9 @@ let refresh = async function() {
 
         hoverify(objVideo);
 
-        // watched videos normally stay cached, but a partial history resume bar is fresh evidence that can demote
+        // watched videos normally stay cached, but a partial resume bar (any page) is fresh evidence that can demote
         // an unconfirmed watched mark back to watching.
-        if ((objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched') && ((boolHistorymark !== true) || (intPercent >= intThreshold))) {
+        if ((objVideodata.hasOwnProperty(strIdent) === true) && (objVideodata[strIdent].strState === 'watched') && ((boolProgressfound !== true) || (intPercent >= intThreshold))) {
             continue;
         }
 
@@ -247,10 +251,20 @@ let refresh = async function() {
         }
 
         // on the youtube history page we register the video (assumed - watched elsewhere) instead of just looking it up;
-        // a positive resume bar (red line) decides watching vs watched. a plain lookup only needs the id and title, so
-        // the mark-only fields (state / percent / assumed / timestamp) are added only when we are actually marking.
+        // a positive resume bar (red line) decides watching vs watched. elsewhere (home, sidebar, streams tab, ...) the
+        // same resume bar is still authoritative for the percentage, so it is reported as a progress reading instead of
+        // an assumed watch. a plain lookup only needs the id and title, so the extra fields are added only when we
+        // actually have something to report.
+        let strMessage = 'youtubeLookup';
+
+        if (boolHistorymark === true) {
+            strMessage = 'youtubeMark';
+        } else if (boolProgressfound === true) {
+            strMessage = 'youtubeProgress';
+        }
+
         let objMessage = {
-            'strMessage': boolHistorymark === true ? 'youtubeMark' : 'youtubeLookup',
+            'strMessage': strMessage,
             'strIdent': strIdent,
             'strTitle': strTitle,
         };
@@ -261,6 +275,10 @@ let refresh = async function() {
             objMessage.boolAssumed = true;
             // stamp it with the date youtube lists it under, so the plugin entry matches the watch history instead of "now"
             objMessage.intTimestamp = funcHistorytimestamp(objVideo);
+
+        } else if (boolProgressfound === true) {
+            objMessage.intPercent = intPercent;
+            objMessage.boolEnsure = true;
         }
 
         await chrome.runtime.sendMessage(objMessage, function(objResponse) {

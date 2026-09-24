@@ -753,7 +753,7 @@
             objMenus.create({
                 'id': strContextmenu,
                 'title': 'Add to Watchlist',
-                'contexts': ['link'],
+                'contexts': ['link', 'page'],
             }, function() {
                 void chrome.runtime.lastError;
             });
@@ -770,7 +770,7 @@
                 return;
             }
 
-            funcAddUrl(objInfo.linkUrl || '').then(function(objResponse) {
+            funcAddUrl(objInfo.linkUrl || objInfo.pageUrl || '').then(function(objResponse) {
                 if ((objResponse !== null) && (objResponse.boolAdded === true)) {
                     funcOpenSidebar();
                 }
